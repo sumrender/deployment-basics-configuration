@@ -1,46 +1,5 @@
-variable "aws_region" {
-  description = "AWS region for resources"
-  type        = string
-  default     = "ap-south-1"
-}
-
-variable "aws_profile" {
-  description = "AWS CLI profile name to use for credentials (optional). If null, the AWS provider will use the default credential chain (env vars, shared config/credentials files, etc)."
-  type        = string
-  default     = "sumrender-paid"
-}
-
-variable "instance_type" {
-  description = "EC2 instance type"
-  type        = string
-  default     = "t3.large"
-}
-
-variable "allowed_ssh_cidr" {
-  description = "CIDR block allowed to SSH (port 22)"
-  type        = string
-  default     = "0.0.0.0/0"
-}
-
-variable "github_repo_url" {
-  description = "GitHub repository URL to clone"
-  type        = string
-  default     = "https://github.com/sumrender/deployment-basics-configuration.git"
-}
-
-variable "github_repo_branch" {
-  description = "GitHub repository branch to clone"
-  type        = string
-  default     = "main"
-}
-
 variable "environment" {
   description = "Environment name (dev, staging, etc.) - used for resource naming"
-  type        = string
-}
-
-variable "k8s_env" {
-  description = "Kubernetes environment name - determines which k8s manifests to apply (dev, staging, etc.)"
   type        = string
 }
 
