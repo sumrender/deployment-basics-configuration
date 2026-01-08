@@ -125,7 +125,7 @@ REPO_PATH="$${REPO_PATH#http://github.com/}"
 REPO_PATH="$${REPO_PATH#git@github.com:}"
 REPO_PATH="$${REPO_PATH%.git}"
 
-RAW_BOOTSTRAP_URL="https://raw.githubusercontent.com/$${REPO_PATH}/${var.github_repo_branch}/dummy-configuration/tf/ec2-k3s/bootstrap-k3s-ec2.sh"
+RAW_BOOTSTRAP_URL="https://raw.githubusercontent.com/$${REPO_PATH}/${var.github_repo_branch}/tf/ec2-k3s/bootstrap-k3s-ec2.sh"
 curl -fsSL -o "$BOOTSTRAP_SCRIPT" "$RAW_BOOTSTRAP_URL"
 chmod +x "$BOOTSTRAP_SCRIPT"
 
@@ -142,6 +142,11 @@ resource "aws_instance" "k3s_cluster" {
   vpc_security_group_ids      = [aws_security_group.ec2_sg.id]
   subnet_id                   = data.aws_subnet.default.id
   associate_public_ip_address = true
+
+  root_block_device {
+    volume_size = 30
+    volume_type = "gp3"
+  }
 
   user_data = local.user_data
 

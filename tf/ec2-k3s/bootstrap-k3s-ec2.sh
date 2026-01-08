@@ -256,11 +256,11 @@ apply_manifests() {
     cd "$REPO_DIR"
     
     # Validate K8S_ENV
-    local k8s_manifest_dir="dummy-configuration/k8s/${K8S_ENV}"
+    local k8s_manifest_dir="k8s/${K8S_ENV}"
     if [[ ! -d "$k8s_manifest_dir" ]]; then
         log_error "Kubernetes manifest directory not found: ${k8s_manifest_dir}"
         log_error "K8S_ENV is set to: ${K8S_ENV}"
-        log_error "Available environments: $(ls -d dummy-configuration/k8s/*/ 2>/dev/null | xargs -n1 basename 2>/dev/null | tr '\n' ' ' || echo 'none found')"
+        log_error "Available environments: $(ls -d k8s/*/ 2>/dev/null | xargs -n1 basename 2>/dev/null | tr '\n' ' ' || echo 'none found')"
         exit 1
     fi
     
