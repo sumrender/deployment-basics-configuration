@@ -47,6 +47,14 @@ resource "aws_security_group" "ec2_sg" {
     cidr_blocks = [var.allowed_ssh_cidr]
   }
 
+  ingress {
+    description = "Debug port"
+    from_port   = 8080
+    to_port     = 8080
+    protocol    = "tcp"
+    cidr_blocks = [var.allowed_ssh_cidr]
+  }
+
   egress {
     description = "Allow all outbound"
     from_port   = 0
