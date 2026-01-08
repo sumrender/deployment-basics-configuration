@@ -24,7 +24,7 @@ set -euo pipefail
 #     - Port 22 (SSH)
 #     - Port 80 (HTTP for Caddy)
 #     - Port 443 (HTTPS for Caddy, optional if using HTTP only)
-#     - Port 3333 (ArgoCD UI)
+#     - Port 30033 (ArgoCD UI)
 #
 # Important Notes:
 #   - This script does NOT configure host firewall (ufw). You must restrict
@@ -37,7 +37,7 @@ set -euo pipefail
 # After completion:
 #   - Verify with: kubectl get pods,svc
 #   - Access app at: http://<EC2_PUBLIC_IP>/
-#   - Access ArgoCD UI at: http://<EC2_PUBLIC_IP>:3333 (username: admin)
+#   - Access ArgoCD UI at: http://<EC2_PUBLIC_IP>:30033 (username: admin)
 ################################################################################
 
 # Colors for output
@@ -476,29 +476,95 @@ install_argocd() {
     fi
 }
 
-# Step 7: Expose ArgoCD UI on port 3333
+# Step 7: Expose ArgoCD UI on port 30033 via systemd port-forward
 expose_argocd_ui() {
     log_step_start "expose_argocd_ui"
-    log_info "Exposing ArgoCD UI on port 3333 (NodePort)..."
+    log_info "Exposing ArgoCD UI on port 30033 (port-forward via systemd)..."
     
-    # Patch ArgoCD server service to NodePort type with port 3333
-    log_to_file "INFO" "Executing: k3s kubectl patch svc argocd-server to NodePort"
-    if k3s kubectl patch svc argocd-server -n argocd -p '{"spec":{"type":"NodePort","ports":[{"port":443,"targetPort":8080,"nodePort":3333,"protocol":"TCP"}]}}'; then
-        log_to_file "INFO" "ArgoCD service patched successfully"
-    else
-        log_step_error "expose_argocd_ui" "Failed to patch ArgoCD server service" "$?"
+    # Determine target user (same logic as configure_kubeconfig)
+    local target_user="${SUDO_USER:-ubuntu}"
+    
+    if ! id "$target_user" &>/dev/null; then
+        log_step_error "expose_argocd_ui" "User '${target_user}' does not exist" "1"
         exit 1
     fi
     
-    # Verify service is updated
-    local service_type
-    service_type=$(k3s kubectl get svc argocd-server -n argocd -o jsonpath='{.spec.type}' 2>/dev/null || echo "")
+    local target_home
+    target_home="$(eval echo "~${target_user}")"
+    if [[ -z "$target_home" || ! -d "$target_home" ]]; then
+        log_step_error "expose_argocd_ui" "Cannot determine home for user '${target_user}'" "1"
+        exit 1
+    fi
     
-    if [[ "$service_type" == "NodePort" ]]; then
-        log_info "ArgoCD UI exposed on port 3333"
+    local kubeconfig_path="${target_home}/.kube/config"
+    if [[ ! -f "$kubeconfig_path" ]]; then
+        log_step_error "expose_argocd_ui" "kubeconfig not found at ${kubeconfig_path}. Ensure configure_kubeconfig() runs first." "1"
+        exit 1
+    fi
+    
+    # Create systemd service file
+    log_to_file "INFO" "Creating systemd service for ArgoCD port-forward"
+    local systemd_service="/etc/systemd/system/argocd-port-forward.service"
+    
+    cat > "$systemd_service" <<EOF
+[Unit]
+Description=ArgoCD UI Port Forward
+After=network.target
+
+[Service]
+Type=simple
+User=${target_user}
+Restart=always
+RestartSec=10
+ExecStart=/usr/local/bin/k3s kubectl port-forward svc/argocd-server -n argocd 30033:443 --address=0.0.0.0
+Environment="KUBECONFIG=${kubeconfig_path}"
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    
+    if [[ ! -f "$systemd_service" ]]; then
+        log_step_error "expose_argocd_ui" "Failed to create systemd service file" "$?"
+        exit 1
+    fi
+    
+    log_to_file "INFO" "Systemd service file created at ${systemd_service}"
+    
+    # Reload systemd daemon
+    log_to_file "INFO" "Executing: systemctl daemon-reload"
+    if systemctl daemon-reload; then
+        log_to_file "INFO" "Systemd daemon reloaded"
+    else
+        log_step_error "expose_argocd_ui" "Failed to reload systemd daemon" "$?"
+        exit 1
+    fi
+    
+    # Enable and start the service
+    log_to_file "INFO" "Executing: systemctl enable argocd-port-forward.service"
+    if systemctl enable argocd-port-forward.service; then
+        log_to_file "INFO" "ArgoCD port-forward service enabled"
+    else
+        log_step_error "expose_argocd_ui" "Failed to enable argocd-port-forward service" "$?"
+        exit 1
+    fi
+    
+    log_to_file "INFO" "Executing: systemctl start argocd-port-forward.service"
+    if systemctl start argocd-port-forward.service; then
+        log_to_file "INFO" "ArgoCD port-forward service started"
+    else
+        log_step_error "expose_argocd_ui" "Failed to start argocd-port-forward service" "$?"
+        exit 1
+    fi
+    
+    # Wait a moment for service to initialize
+    sleep 2
+    
+    # Verify service is running
+    if systemctl is-active --quiet argocd-port-forward.service; then
+        log_info "ArgoCD UI exposed on port 30033 via port-forward"
         log_step_end "expose_argocd_ui"
     else
-        log_warn "ArgoCD service type is ${service_type}, expected NodePort"
+        log_warn "ArgoCD port-forward service may not be running. Check status: systemctl status argocd-port-forward.service"
         log_step_end "expose_argocd_ui"
     fi
 }
@@ -651,14 +717,14 @@ print_status() {
         echo -e "    ${YELLOW}http://${PUBLIC_IP}/${NC}"
         echo ""
         echo -e "  ${GREEN}Access ArgoCD UI at:${NC}"
-        echo -e "    ${YELLOW}http://${PUBLIC_IP}:3333${NC}"
+        echo -e "    ${YELLOW}http://${PUBLIC_IP}:30033${NC}"
         echo -e "    Username: ${YELLOW}admin${NC}"
         echo -e "    Password: ${YELLOW}(custom password set via ARGOCD_ADMIN_PASSWORD)${NC}"
         echo ""
     else
         echo "  Replace <EC2_PUBLIC_IP> with your instance's public IP:"
         echo "    Application: http://<EC2_PUBLIC_IP>/"
-        echo "    ArgoCD UI: http://<EC2_PUBLIC_IP>:3333"
+        echo "    ArgoCD UI: http://<EC2_PUBLIC_IP>:30033"
         echo ""
     fi
     

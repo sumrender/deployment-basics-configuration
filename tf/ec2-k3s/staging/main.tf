@@ -41,8 +41,8 @@ resource "aws_security_group" "ec2_sg" {
 
   ingress {
     description = "ArgoCD UI"
-    from_port   = 3333
-    to_port     = 3333
+    from_port   = 30033
+    to_port     = 30033
     protocol    = "tcp"
     cidr_blocks = [var.allowed_ssh_cidr]
   }
