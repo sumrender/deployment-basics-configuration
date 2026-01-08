@@ -48,12 +48,14 @@ NC='\033[0m' # No Color
 
 # Log file configuration
 LOG_DIR="/var/log/bootstrap-k3s-ec2"
-LOG_FILE_TIMESTAMP=$(date +%Y%m%d-%H%M%S)
-LOG_FILE="${LOG_DIR}/bootstrap-${LOG_FILE_TIMESTAMP}.log"
-LOG_FILE_LATEST="${LOG_DIR}/latest.log"
+LOG_FILE=""
+LOG_FILE_LATEST=""
 
 # Initialize log directory and file
 init_log_file() {
+    # Generate timestamp when log file is actually created
+    local LOG_FILE_TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+    
     # Try to create log directory in /var/log, fallback to /tmp if it fails
     if ! mkdir -p "$LOG_DIR" 2>/dev/null; then
         LOG_DIR="/tmp/bootstrap-k3s-ec2"
@@ -65,6 +67,10 @@ init_log_file() {
             LOG_FILE="/tmp/bootstrap-k3s-ec2-${LOG_FILE_TIMESTAMP}.log"
             LOG_FILE_LATEST="/tmp/bootstrap-k3s-ec2-latest.log"
         }
+    else
+        # Set log file paths for /var/log location
+        LOG_FILE="${LOG_DIR}/bootstrap-${LOG_FILE_TIMESTAMP}.log"
+        LOG_FILE_LATEST="${LOG_DIR}/latest.log"
     fi
     
     # Create log file with header
@@ -74,7 +80,7 @@ init_log_file() {
         echo "Started: $(date '+%Y-%m-%d %H:%M:%S')"
         echo "================================================================================"
         echo ""
-    } > "$LOG_FILE"
+    } > "$LOG_FILE" 2>/dev/null || true
     
     # Create symlink to latest log
     ln -sf "$LOG_FILE" "$LOG_FILE_LATEST" 2>/dev/null || true
@@ -95,21 +101,21 @@ log_info() {
     local message="$1"
     local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
     echo -e "${GREEN}[INFO]${NC} $message"
-    echo "[${timestamp}] [INFO] $message" >> "$LOG_FILE"
+    echo "[${timestamp}] [INFO] $message" >> "$LOG_FILE" 2>/dev/null || true
 }
 
 log_warn() {
     local message="$1"
     local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
     echo -e "${YELLOW}[WARN]${NC} $message"
-    echo "[${timestamp}] [WARN] $message" >> "$LOG_FILE"
+    echo "[${timestamp}] [WARN] $message" >> "$LOG_FILE" 2>/dev/null || true
 }
 
 log_error() {
     local message="$1"
     local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
     echo -e "${RED}[ERROR]${NC} $message"
-    echo "[${timestamp}] [ERROR] $message" >> "$LOG_FILE"
+    echo "[${timestamp}] [ERROR] $message" >> "$LOG_FILE" 2>/dev/null || true
 }
 
 # Logging functions for file-only logging
@@ -117,7 +123,7 @@ log_to_file() {
     local level="$1"
     local message="$2"
     local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
-    echo "[${timestamp}] [${level}] $message" >> "$LOG_FILE"
+    echo "[${timestamp}] [${level}] $message" >> "$LOG_FILE" 2>/dev/null || true
 }
 
 log_step_start() {
@@ -160,10 +166,15 @@ check_ubuntu() {
     source /etc/os-release
     if [[ "$ID" != "ubuntu" ]]; then
         log_warn "This script is designed for Ubuntu. Detected: $ID"
-        read -p "Continue anyway? (y/N) " -n 1 -r
-        echo
-        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-            exit 1
+        # Check if running in non-interactive mode (e.g., via cloud-init/user_data)
+        if [[ -n "${NONINTERACTIVE:-}" ]] || [[ ! -t 0 ]]; then
+            log_warn "Running in non-interactive mode. Continuing anyway..."
+        else
+            read -p "Continue anyway? (y/N) " -n 1 -r
+            echo
+            if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+                exit 1
+            fi
         fi
     fi
 }
@@ -677,6 +688,9 @@ print_status() {
 
 # Main execution
 main() {
+    # Initialize log directory and file FIRST, before any logging
+    init_log_file
+    
     log_info "Starting EC2 k3s bootstrap process..."
     log_info "Kubernetes environment: ${K8S_ENV}"
     echo ""
@@ -699,7 +713,7 @@ main() {
     
     log_info "Bootstrap complete!"
     log_to_file "INFO" "Bootstrap script completed successfully at $(date '+%Y-%m-%d %H:%M:%S')"
-    echo "================================================================================" >> "$LOG_FILE"
+    echo "================================================================================" >> "$LOG_FILE" 2>/dev/null || true
 }
 
 # Run main function
