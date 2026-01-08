@@ -222,10 +222,10 @@ install_k3s() {
         return
     fi
     
-    log_info "Installing k3s (single-node cluster)..."
-    log_to_file "INFO" "Executing: curl -sfL ${K3S_INSTALL_SCRIPT} | sh -"
-    if curl -sfL "$K3S_INSTALL_SCRIPT" | sh -; then
-        log_to_file "INFO" "k3s installation command completed successfully"
+    log_info "Installing k3s (single-node cluster, Traefik disabled)..."
+    log_to_file "INFO" "Executing: curl -sfL ${K3S_INSTALL_SCRIPT} | INSTALL_K3S_EXEC='--disable traefik' sh -"
+    if curl -sfL "$K3S_INSTALL_SCRIPT" | INSTALL_K3S_EXEC="--disable traefik" sh -; then
+        log_to_file "INFO" "k3s installation command completed successfully (Traefik disabled)"
     else
         log_step_error "install_k3s" "k3s installation command failed" "$?"
         exit 1
