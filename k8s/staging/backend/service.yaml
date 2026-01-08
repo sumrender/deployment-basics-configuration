@@ -5,6 +5,8 @@ metadata:
   namespace: default
   labels:
     app: backend
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
 spec:
   type: LoadBalancer
   ports:

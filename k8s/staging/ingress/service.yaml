@@ -5,6 +5,8 @@ metadata:
   namespace: default
   labels:
     app: caddy
+  annotations:
+    argocd.argoproj.io/sync-wave: "5"
 spec:
   type: LoadBalancer
   ports:

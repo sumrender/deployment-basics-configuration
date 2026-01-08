@@ -5,6 +5,8 @@ metadata:
   namespace: default
   labels:
     app: elasticsearch
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
 spec:
   type: LoadBalancer
   ports:

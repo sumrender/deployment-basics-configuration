@@ -3,6 +3,8 @@ kind: ConfigMap
 metadata:
   name: caddy-config
   namespace: default
+  annotations:
+    argocd.argoproj.io/sync-wave: "4"
 data:
   Caddyfile: |
     # Local development configuration (HTTP only)

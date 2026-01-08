@@ -5,6 +5,8 @@ metadata:
   namespace: default
   labels:
     app: mongo
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
 spec:
   clusterIP: None
   ports:
