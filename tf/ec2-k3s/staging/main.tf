@@ -39,6 +39,14 @@ resource "aws_security_group" "ec2_sg" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 
+  ingress {
+    description = "ArgoCD UI"
+    from_port   = 3333
+    to_port     = 3333
+    protocol    = "tcp"
+    cidr_blocks = [var.allowed_ssh_cidr]
+  }
+
   egress {
     description = "Allow all outbound"
     from_port   = 0
@@ -78,8 +86,8 @@ RAW_BOOTSTRAP_URL="https://raw.githubusercontent.com/$${REPO_PATH}/${var.github_
 curl -fsSL -o "$BOOTSTRAP_SCRIPT" "$RAW_BOOTSTRAP_URL"
 chmod +x "$BOOTSTRAP_SCRIPT"
 
-# Run the bootstrap script with K8S_ENV environment variable
-REPO_URL="${var.github_repo_url}" REPO_BRANCH="${var.github_repo_branch}" K8S_ENV="staging" "$BOOTSTRAP_SCRIPT"
+# Run the bootstrap script with K8S_ENV and ARGOCD_ADMIN_PASSWORD environment variables
+REPO_URL="${var.github_repo_url}" REPO_BRANCH="${var.github_repo_branch}" K8S_ENV="staging" ARGOCD_ADMIN_PASSWORD="${var.argocd_admin_password}" "$BOOTSTRAP_SCRIPT"
 EOF
 }
 
