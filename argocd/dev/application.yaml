@@ -11,6 +11,8 @@ spec:
     repoURL: https://github.com/sumrender/deployment-basics-configuration.git
     targetRevision: main
     path: k8s/dev
+    directory:
+      recurse: true
   destination:
     server: https://kubernetes.default.svc
     namespace: default
