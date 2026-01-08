@@ -14,24 +14,23 @@ spec:
         app: frontend
     spec:
       containers:
-      - name: frontend
-        image: sumrenders/todo-frontend:latest
-        imagePullPolicy: IfNotPresent
-        ports:
-        - containerPort: 3000
-          name: http
-        env:
-        - name: NODE_ENV
-          value: "production"
-        - name: NEXT_PUBLIC_API_URL
-          value: "/api"
-        - name: NEXT_PUBLIC_ELASTICSEARCH_URL
-          value: "/es"
-        resources:
-          requests:
-            memory: "128Mi"
-            cpu: "100m"
-          limits:
-            memory: "256Mi"
-            cpu: "200m"
-
+        - name: frontend
+          image: sumrenders/todo-frontend:24f5c53c214c0359a0dea9b794e67d30890dcce5
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 3000
+              name: http
+          env:
+            - name: NODE_ENV
+              value: "production"
+            - name: NEXT_PUBLIC_API_URL
+              value: "/api"
+            - name: NEXT_PUBLIC_ELASTICSEARCH_URL
+              value: "/es"
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "256Mi"
+              cpu: "200m"
