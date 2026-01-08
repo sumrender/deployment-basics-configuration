@@ -6,6 +6,7 @@ This directory contains Terraform and Kubernetes configuration for deploying the
 
 - `k8s/` - Kubernetes manifests organized by environment (dev, staging)
 - `tf/` - Terraform configurations for EC2 + K3s infrastructure
+- `argocd/` - Argo CD GitOps configuration and bootstrap scripts
 
 ## Environments
 

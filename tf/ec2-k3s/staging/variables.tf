@@ -33,3 +33,10 @@ variable "github_repo_branch" {
   type        = string
   default     = "main"
 }
+
+variable "argocd_admin_password" {
+  description = "ArgoCD admin password (required)"
+  type        = string
+  sensitive   = true
+  default = "iacAdmin"
+}
