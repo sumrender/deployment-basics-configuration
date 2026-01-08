@@ -25,7 +25,7 @@ variable "allowed_ssh_cidr" {
 variable "github_repo_url" {
   description = "GitHub repository URL to clone"
   type        = string
-  default     = "https://github.com/sumrender/deployment-basics.git"
+  default     = "https://github.com/sumrender/deployment-basics-configuration.git"
 }
 
 variable "github_repo_branch" {

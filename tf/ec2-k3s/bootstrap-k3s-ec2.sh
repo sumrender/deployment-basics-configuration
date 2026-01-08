@@ -12,7 +12,7 @@ set -euo pipefail
 #
 # Environment Variables:
 #   - K8S_ENV: Kubernetes environment name (dev, staging, etc.) - determines which manifests to apply
-#   - REPO_URL: GitHub repository URL to clone (default: https://github.com/sumrender/deployment-basics.git)
+#   - REPO_URL: GitHub repository URL to clone (default: https://github.com/sumrender/deployment-basics-configuration.git)
 #   - REPO_BRANCH: GitHub repository branch to clone (default: main)
 #
 # Prerequisites:
@@ -43,9 +43,9 @@ YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
 # Configuration (can be overridden via environment variables)
-REPO_URL="${REPO_URL:-https://github.com/sumrender/deployment-basics.git}"
+REPO_URL="${REPO_URL:-https://github.com/sumrender/deployment-basics-configuration.git}"
 REPO_BRANCH="${REPO_BRANCH:-main}"
-REPO_DIR="${REPO_DIR:-/tmp/deployment-basics}"
+REPO_DIR="${REPO_DIR:-/tmp/deployment-basics-configuration}"
 K3S_INSTALL_SCRIPT="${K3S_INSTALL_SCRIPT:-https://get.k3s.io}"
 K8S_ENV="${K8S_ENV:-dev}"
 
