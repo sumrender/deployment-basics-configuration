@@ -98,7 +98,12 @@ get_k3s_token() {
     done
     
     log_error "Failed to retrieve k3s server token from Parameter Store after ${max_retries} attempts"
-    log_error "Make sure the master node has completed setup and stored the token"
+    log_error "Troubleshooting steps:"
+    log_error "  1. Verify the master node has completed setup"
+    log_error "  2. Check AWS Parameter Store: ${K3S_TOKEN_PARAMETER_NAME}"
+    log_error "  3. Verify IAM permissions for Parameter Store access"
+    log_error "  4. Check AWS region: ${AWS_REGION}"
+    log_error "  5. Review master node logs to ensure token was stored"
     exit 1
 }
 
@@ -130,7 +135,12 @@ get_master_ip() {
     done
     
     log_error "Failed to retrieve master node IP from Parameter Store after ${max_retries} attempts"
-    log_error "Make sure the master node has completed setup and stored the IP"
+    log_error "Troubleshooting steps:"
+    log_error "  1. Verify the master node has completed setup"
+    log_error "  2. Check AWS Parameter Store: ${K3S_MASTER_IP_PARAMETER_NAME}"
+    log_error "  3. Verify IAM permissions for Parameter Store access"
+    log_error "  4. Check AWS region: ${AWS_REGION}"
+    log_error "  5. Review master node logs to ensure IP was stored"
     exit 1
 }
 
@@ -145,6 +155,15 @@ wait_for_node_ready() {
     while ! systemctl is-active --quiet k3s-agent 2>/dev/null; do
         if [[ $elapsed -ge $timeout ]]; then
             log_error "k3s agent failed to start within ${timeout}s"
+            log_error "The agent service installation completed but the service is not running."
+            # Inspect failure before exiting
+            inspect_k3s_agent_failure
+            log_error ""
+            log_error "Additional troubleshooting:"
+            log_error "  1. Check master node is running: kubectl get nodes (on master)"
+            log_error "  2. Verify security groups allow traffic on port 6443"
+            log_error "  3. Check network connectivity: ping ${master_ip}"
+            log_error "  4. Review full logs: journalctl -xeu k3s-agent.service"
             exit 1
         fi
         sleep 2
@@ -156,6 +175,112 @@ wait_for_node_ready() {
     # Note: We can't check kubectl from worker node directly
     # The master node will see this node once it joins
     log_info "Node should be joining the cluster. Master node will see it shortly."
+}
+
+# Install k3s agent with retry logic and error handling
+install_k3s_agent_with_retry() {
+    local master_ip="$1"
+    local k3s_token="$2"
+    local max_retries=3
+    local retry_count=0
+    local retry_delay=10
+    
+    # Set environment variables for k3s agent installation
+    export K3S_URL="https://${master_ip}:6443"
+    export K3S_TOKEN="$k3s_token"
+    
+    log_info "Installing k3s as agent to join master at ${master_ip}..."
+    log_info "K3S_URL: ${K3S_URL}"
+    
+    while [[ $retry_count -lt $max_retries ]]; do
+        retry_count=$((retry_count + 1))
+        
+        if [[ $retry_count -gt 1 ]]; then
+            log_warn "Retrying k3s agent installation (attempt $retry_count/$max_retries)..."
+            log_info "Waiting ${retry_delay} seconds before retry..."
+            sleep $retry_delay
+            retry_delay=$((retry_delay * 2))  # Exponential backoff
+        fi
+        
+        # Verify master is ready before attempting installation
+        if ! check_master_api_readiness "$master_ip" 60 12; then
+            if [[ $retry_count -lt $max_retries ]]; then
+                log_warn "Master not ready, will retry in ${retry_delay} seconds..."
+                continue
+            else
+                log_error "Master API server not ready after multiple attempts"
+                log_error "Cannot proceed with agent installation"
+                log_error ""
+                log_error "Troubleshooting steps:"
+                log_error "  1. Verify master node is running and k3s server is installed"
+                log_error "  2. Check master node logs for k3s server startup issues"
+                log_error "  3. Verify security group allows inbound traffic on port 6443 from workers"
+                log_error "  4. Test connectivity manually: curl -k https://${master_ip}:6443"
+                log_error "  5. Check master node: systemctl status k3s"
+                exit 1
+            fi
+        fi
+        
+        # Attempt installation
+        log_info "Attempting k3s agent installation (attempt $retry_count/$max_retries)..."
+        
+        # Temporarily disable exit on error to capture installation failure
+        set +e
+        install_k3s_binary "agent"
+        local install_result=$?
+        set -e
+        
+        if [[ $install_result -eq 0 ]]; then
+            # Installation succeeded, but check if service started
+            log_info "k3s agent installation completed"
+            
+            # Wait a moment for service to initialize
+            sleep 3
+            
+            # Check if service is running
+            if systemctl is-active --quiet k3s-agent 2>/dev/null; then
+                log_info "k3s agent service is running successfully"
+                return 0
+            else
+                log_warn "k3s agent installed but service is not running"
+                # Show diagnostics
+                inspect_k3s_agent_failure
+                
+                if [[ $retry_count -lt $max_retries ]]; then
+                    log_warn "Will retry installation..."
+                    # Try to clean up failed installation
+                    if [[ -f /usr/local/bin/k3s-agent-uninstall.sh ]]; then
+                        log_info "Cleaning up failed installation..."
+                        /usr/local/bin/k3s-agent-uninstall.sh > /dev/null 2>&1 || true
+                    fi
+                    continue
+                else
+                    log_error "k3s agent service failed to start after ${max_retries} attempts"
+                    exit 1
+                fi
+            fi
+        else
+            log_error "k3s agent installation failed (attempt $retry_count/$max_retries)"
+            
+            if [[ $retry_count -lt $max_retries ]]; then
+                log_warn "Will retry installation..."
+                # Clean up any partial installation
+                if [[ -f /usr/local/bin/k3s-agent-uninstall.sh ]]; then
+                    log_info "Cleaning up failed installation..."
+                    /usr/local/bin/k3s-agent-uninstall.sh > /dev/null 2>&1 || true
+                fi
+                continue
+            else
+                log_error "k3s agent installation failed after ${max_retries} attempts"
+                inspect_k3s_agent_failure
+                exit 1
+            fi
+        fi
+    done
+    
+    log_error "Failed to install k3s agent after ${max_retries} attempts"
+    inspect_k3s_agent_failure
+    exit 1
 }
 
 # Main execution
@@ -176,15 +301,23 @@ main() {
     local master_ip
     master_ip=$(get_master_ip)
     
-    # Install k3s as agent
-    log_info "Installing k3s as agent to join master at ${master_ip}..."
+    # Verify master is ready before attempting installation
+    log_info "Verifying master node readiness before agent installation..."
+    log_info "This may take a few minutes if the master node is still starting up..."
+    if ! check_master_api_readiness "$master_ip" 300 30; then
+        log_error "Master node is not ready. Cannot proceed with worker node setup."
+        log_error ""
+        log_error "Troubleshooting steps:"
+        log_error "  1. Wait for master node to complete setup (check master node logs)"
+        log_error "  2. Verify master node is running: systemctl status k3s (on master)"
+        log_error "  3. Check security groups allow traffic on port 6443 from worker to master"
+        log_error "  4. Test connectivity: curl -k https://${master_ip}:6443"
+        log_error "  5. Verify master IP is correct: ${master_ip}"
+        exit 1
+    fi
     
-    # Set environment variables for k3s agent installation
-    export K3S_URL="https://${master_ip}:6443"
-    export K3S_TOKEN="$k3s_token"
-    
-    # Install k3s agent (K3S_URL and K3S_TOKEN are already exported)
-    install_k3s_binary "agent"
+    # Install k3s as agent with retry logic
+    install_k3s_agent_with_retry "$master_ip" "$k3s_token"
     
     # Wait for agent to be ready (check systemd service instead of kubectl)
     wait_for_node_ready
