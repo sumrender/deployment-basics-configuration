@@ -48,11 +48,13 @@ resource "aws_iam_role_policy" "ec2_parameter_store_policy" {
         Action = [
           "ssm:GetParameter",
           "ssm:PutParameter",
-          "ssm:GetParameters"
+          "ssm:GetParameters",
+          "ssm:DescribeParameters"
         ]
         Resource = [
           "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter/${var.k3s_server_token_parameter_name}",
-          "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter/${var.k3s_master_ip_parameter_name}"
+          "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter/${var.k3s_master_ip_parameter_name}",
+          "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter/k3s/prod/*"
         ]
       }
     ]
