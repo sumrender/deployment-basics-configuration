@@ -9,6 +9,9 @@ module "common" {
   environment = "prod"
 }
 
+# Get current AWS account ID
+data "aws_caller_identity" "current" {}
+
 # IAM role for EC2 instances to access Parameter Store
 resource "aws_iam_role" "ec2_k3s_role" {
   name = "ec2-k3s-role-prod"
@@ -48,8 +51,8 @@ resource "aws_iam_role_policy" "ec2_parameter_store_policy" {
           "ssm:GetParameters"
         ]
         Resource = [
-          "arn:aws:ssm:${var.aws_region}:*:parameter/${var.k3s_server_token_parameter_name}",
-          "arn:aws:ssm:${var.aws_region}:*:parameter/${var.k3s_master_ip_parameter_name}"
+          "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter/${var.k3s_server_token_parameter_name}",
+          "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter/${var.k3s_master_ip_parameter_name}"
         ]
       }
     ]
@@ -105,30 +108,6 @@ resource "aws_security_group" "master_sg" {
     cidr_blocks = [var.allowed_ssh_cidr]
   }
 
-  ingress {
-    description     = "k3s API server"
-    from_port       = 6443
-    to_port         = 6443
-    protocol        = "tcp"
-    security_groups = [aws_security_group.worker_sg.id]
-  }
-
-  ingress {
-    description     = "k3s agent registration (Flannel VXLAN)"
-    from_port       = 8472
-    to_port         = 8472
-    protocol        = "udp"
-    security_groups = [aws_security_group.worker_sg.id]
-  }
-
-  ingress {
-    description     = "k3s kubelet"
-    from_port       = 10250
-    to_port         = 10250
-    protocol        = "tcp"
-    security_groups = [aws_security_group.worker_sg.id]
-  }
-
   egress {
     description = "Allow all outbound"
     from_port   = 0
@@ -157,24 +136,6 @@ resource "aws_security_group" "worker_sg" {
     cidr_blocks = [var.allowed_ssh_cidr]
   }
 
-  ingress {
-    description     = "k3s agent registration (Flannel VXLAN)"
-    from_port       = 8472
-    to_port         = 8472
-    protocol        = "udp"
-    security_groups = [aws_security_group.master_sg.id, aws_security_group.worker_sg.id]
-    self            = true
-  }
-
-  ingress {
-    description     = "k3s kubelet"
-    from_port       = 10250
-    to_port         = 10250
-    protocol        = "tcp"
-    security_groups = [aws_security_group.master_sg.id, aws_security_group.worker_sg.id]
-    self            = true
-  }
-
   egress {
     description = "Allow all outbound"
     from_port   = 0
@@ -187,6 +148,78 @@ resource "aws_security_group" "worker_sg" {
     Name        = "ec2-k3s-worker-sg-prod"
     Environment = "prod"
   }
+}
+
+# Security group rules for master node (from workers)
+resource "aws_security_group_rule" "master_api_from_workers" {
+  type                     = "ingress"
+  description              = "k3s API server from workers"
+  from_port                = 6443
+  to_port                  = 6443
+  protocol                 = "tcp"
+  source_security_group_id = aws_security_group.worker_sg.id
+  security_group_id        = aws_security_group.master_sg.id
+}
+
+resource "aws_security_group_rule" "master_flannel_from_workers" {
+  type                     = "ingress"
+  description              = "k3s agent registration (Flannel VXLAN) from workers"
+  from_port                = 8472
+  to_port                  = 8472
+  protocol                 = "udp"
+  source_security_group_id = aws_security_group.worker_sg.id
+  security_group_id        = aws_security_group.master_sg.id
+}
+
+resource "aws_security_group_rule" "master_kubelet_from_workers" {
+  type                     = "ingress"
+  description              = "k3s kubelet from workers"
+  from_port                = 10250
+  to_port                  = 10250
+  protocol                 = "tcp"
+  source_security_group_id = aws_security_group.worker_sg.id
+  security_group_id        = aws_security_group.master_sg.id
+}
+
+# Security group rules for worker nodes (from master and self)
+resource "aws_security_group_rule" "worker_flannel_from_master" {
+  type                     = "ingress"
+  description              = "k3s agent registration (Flannel VXLAN) from master"
+  from_port                = 8472
+  to_port                  = 8472
+  protocol                 = "udp"
+  source_security_group_id = aws_security_group.master_sg.id
+  security_group_id        = aws_security_group.worker_sg.id
+}
+
+resource "aws_security_group_rule" "worker_flannel_self" {
+  type              = "ingress"
+  description       = "k3s agent registration (Flannel VXLAN) from self"
+  from_port         = 8472
+  to_port           = 8472
+  protocol          = "udp"
+  self              = true
+  security_group_id = aws_security_group.worker_sg.id
+}
+
+resource "aws_security_group_rule" "worker_kubelet_from_master" {
+  type                     = "ingress"
+  description              = "k3s kubelet from master"
+  from_port                = 10250
+  to_port                  = 10250
+  protocol                 = "tcp"
+  source_security_group_id = aws_security_group.master_sg.id
+  security_group_id        = aws_security_group.worker_sg.id
+}
+
+resource "aws_security_group_rule" "worker_kubelet_self" {
+  type              = "ingress"
+  description       = "k3s kubelet from self"
+  from_port         = 10250
+  to_port           = 10250
+  protocol          = "tcp"
+  self              = true
+  security_group_id = aws_security_group.worker_sg.id
 }
 
 # User data script for master node
@@ -329,6 +362,8 @@ resource "aws_autoscaling_group" "k3s_workers" {
   min_size         = var.worker_desired_capacity
   max_size         = var.worker_desired_capacity
   desired_capacity = var.worker_desired_capacity
+
+  depends_on = [aws_instance.k3s_master]
 
   launch_template {
     id      = aws_launch_template.k3s_worker.id
