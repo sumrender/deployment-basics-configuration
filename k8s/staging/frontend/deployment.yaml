@@ -17,7 +17,7 @@ spec:
     spec:
       containers:
         - name: frontend
-          image: sumrenders/todo-frontend:24f5c53c214c0359a0dea9b794e67d30890dcce5
+          image: sumrenders/todo-frontend:1723f712992cb0f24587b6edc4843d925b0ca6dc
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 3000
