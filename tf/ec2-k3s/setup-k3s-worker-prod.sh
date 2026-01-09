@@ -145,7 +145,9 @@ get_master_ip() {
 }
 
 # Wait for node to join cluster
+# Usage: wait_for_node_ready <master_ip>
 wait_for_node_ready() {
+    local master_ip="${1:-}"
     log_info "Waiting for node to join cluster..."
     
     local timeout=120
@@ -162,7 +164,9 @@ wait_for_node_ready() {
             log_error "Additional troubleshooting:"
             log_error "  1. Check master node is running: kubectl get nodes (on master)"
             log_error "  2. Verify security groups allow traffic on port 6443"
-            log_error "  3. Check network connectivity: ping ${master_ip}"
+            if [[ -n "$master_ip" ]]; then
+                log_error "  3. Check network connectivity: ping ${master_ip}"
+            fi
             log_error "  4. Review full logs: journalctl -xeu k3s-agent.service"
             exit 1
         fi
@@ -320,7 +324,7 @@ main() {
     install_k3s_agent_with_retry "$master_ip" "$k3s_token"
     
     # Wait for agent to be ready (check systemd service instead of kubectl)
-    wait_for_node_ready
+    wait_for_node_ready "$master_ip"
     
     log_info "Worker node setup complete!"
     log_info "This node should appear in the cluster shortly."

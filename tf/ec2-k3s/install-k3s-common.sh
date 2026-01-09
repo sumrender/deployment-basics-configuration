@@ -74,9 +74,17 @@ install_k3s_binary() {
     log_info "Installing k3s as ${k3s_mode}..."
     
     if [[ "$k3s_mode" == "server" ]]; then
-        local install_cmd="curl -sfL ${K3S_INSTALL_SCRIPT} | INSTALL_K3S_EXEC='--disable traefik ${additional_flags}' sh -"
-        log_info "Executing: ${install_cmd}"
-        if eval "$install_cmd"; then
+        # Construct the k3s exec flags
+        local k3s_exec_flags="--disable traefik"
+        if [[ -n "$additional_flags" ]]; then
+            k3s_exec_flags="${k3s_exec_flags} ${additional_flags}"
+        fi
+        
+        log_info "Installing k3s with flags: ${k3s_exec_flags}"
+        log_info "Executing: curl -sfL ${K3S_INSTALL_SCRIPT} | INSTALL_K3S_EXEC='${k3s_exec_flags}' sh -"
+        
+        # Export INSTALL_K3S_EXEC and run the install script
+        if INSTALL_K3S_EXEC="${k3s_exec_flags}" curl -sfL "${K3S_INSTALL_SCRIPT}" | sh -; then
             log_info "k3s installation command completed successfully"
         else
             log_error "k3s installation command failed"
