@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: todo-app-config
+  namespace: default
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+data:
+  MONGODB_URI: "mongodb://mongo-service:27017/todos"
+  ELASTICSEARCH_NODE: "http://elasticsearch-service:9200"
+  PORT: "3001"
+  NODE_ENV: "production"
+  CORS_ORIGIN: "http://localhost:3000"
+
