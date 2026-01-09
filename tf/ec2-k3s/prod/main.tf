@@ -46,10 +46,16 @@ resource "aws_iam_role_policy" "ec2_parameter_store_policy" {
       {
         Effect = "Allow"
         Action = [
+          "ssm:DescribeParameters"
+        ]
+        Resource = "*"
+      },
+      {
+        Effect = "Allow"
+        Action = [
           "ssm:GetParameter",
           "ssm:PutParameter",
-          "ssm:GetParameters",
-          "ssm:DescribeParameters"
+          "ssm:GetParameters"
         ]
         Resource = [
           "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter/${var.k3s_server_token_parameter_name}",

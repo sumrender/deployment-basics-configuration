@@ -180,7 +180,7 @@ store_master_ip() {
     log_info "Storing master node IP in Parameter Store..."
     
     local master_ip
-    master_ip=$(curl -s http://169.254.169.254/latest/meta-data/public-ipv4)
+    master_ip=$(curl -s http://169.254.169.254/latest/meta-data/local-ipv4)
     
     if [[ -z "$master_ip" ]]; then
         log_error "Failed to retrieve master node IP"
