@@ -321,6 +321,161 @@ resource "aws_instance" "k3s_master" {
   }
 }
 
+# Wait for master k3s API server to be ready
+resource "null_resource" "wait_for_master_ready" {
+  depends_on = [aws_instance.k3s_master]
+
+  provisioner "local-exec" {
+    command = <<-EOT
+      set -e
+      echo "Waiting for master k3s API server to be ready..."
+      echo "Using AWS profile: ${var.aws_profile}"
+      echo "Using AWS region: ${var.aws_region}"
+      echo "Looking for parameter: ${var.k3s_master_ip_parameter_name}"
+      
+      # Set AWS profile and region
+      export AWS_PROFILE="${var.aws_profile}"
+      export AWS_DEFAULT_REGION="${var.aws_region}"
+      
+      # Verify AWS credentials
+      if ! aws sts get-caller-identity --region "${var.aws_region}" > /dev/null 2>&1; then
+        echo "ERROR: AWS credentials not configured or invalid for profile: ${var.aws_profile}"
+        exit 1
+      fi
+      
+      MAX_ATTEMPTS=60
+      ATTEMPT=0
+      MASTER_IP=""
+      
+      # Wait for master IP to be stored in Parameter Store
+      while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
+        MASTER_IP=$(aws ssm get-parameter \
+          --name "${var.k3s_master_ip_parameter_name}" \
+          --region "${var.aws_region}" \
+          --profile "${var.aws_profile}" \
+          --query 'Parameter.Value' \
+          --output text 2>&1)
+        
+        # Check if we got an actual IP (not an error message)
+        if echo "$MASTER_IP" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'; then
+          echo "Master IP found in Parameter Store: $MASTER_IP"
+          break
+        fi
+        
+        # Show error if it's not a "parameter not found" error (first few attempts)
+        if [ $ATTEMPT -lt 3 ] && echo "$MASTER_IP" | grep -qv "ParameterNotFound\|Parameter.*not found"; then
+          echo "Warning: $MASTER_IP"
+        fi
+        
+        ATTEMPT=$((ATTEMPT + 1))
+        echo "Waiting for master IP in Parameter Store... (attempt $ATTEMPT/$MAX_ATTEMPTS)"
+        sleep 20
+      done
+      
+      if ! echo "$MASTER_IP" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'; then
+        echo "ERROR: Master IP not found in Parameter Store after $MAX_ATTEMPTS attempts"
+        echo "Last response: $MASTER_IP"
+        echo ""
+        echo "Troubleshooting:"
+        echo "1. Check if parameter exists: aws ssm get-parameter --name ${var.k3s_master_ip_parameter_name} --region ${var.aws_region} --profile ${var.aws_profile}"
+        echo "2. Verify AWS profile is correct: ${var.aws_profile}"
+        exit 1
+      fi
+      
+      # Get master public IP for SSH
+      echo "Retrieving master public IP for SSH access..."
+      MASTER_PUBLIC_IP=$(aws ec2 describe-instances \
+        --region "${var.aws_region}" \
+        --profile "${var.aws_profile}" \
+        --filters "Name=tag:Name,Values=ec2-k3s-master-prod" "Name=instance-state-name,Values=running" \
+        --query 'Reservations[0].Instances[0].PublicIpAddress' \
+        --output text 2>&1)
+      
+      if [ -z "$MASTER_PUBLIC_IP" ] || [ "$MASTER_PUBLIC_IP" = "None" ] || [ "$MASTER_PUBLIC_IP" = "null" ]; then
+        echo "ERROR: Could not retrieve master public IP"
+        echo "Attempted to query instance with tag Name=ec2-k3s-master-prod"
+        exit 1
+      fi
+      
+      echo "Master public IP: $MASTER_PUBLIC_IP"
+      echo "Master private IP: $MASTER_IP"
+      
+      # Get SSH key path
+      SSH_KEY_PATH="${module.common.private_key_file_path}"
+      if [ ! -f "$SSH_KEY_PATH" ]; then
+        echo "ERROR: SSH key not found at $SSH_KEY_PATH"
+        exit 1
+      fi
+      
+      chmod 400 "$SSH_KEY_PATH"
+      
+      # Wait for SSH to be available
+      echo "Waiting for SSH to be available on master node..."
+      SSH_ATTEMPT=0
+      MAX_SSH_ATTEMPTS=30
+      while [ $SSH_ATTEMPT -lt $MAX_SSH_ATTEMPTS ]; do
+        if ssh -i "$SSH_KEY_PATH" \
+           -o StrictHostKeyChecking=no \
+           -o UserKnownHostsFile=/dev/null \
+           -o ConnectTimeout=5 \
+           -o BatchMode=yes \
+           ubuntu@"$MASTER_PUBLIC_IP" \
+           "echo 'SSH connection successful'" > /dev/null 2>&1; then
+          echo "SSH connection established"
+          break
+        fi
+        SSH_ATTEMPT=$((SSH_ATTEMPT + 1))
+        echo "Waiting for SSH... (attempt $SSH_ATTEMPT/$MAX_SSH_ATTEMPTS)"
+        sleep 10
+      done
+      
+      if [ $SSH_ATTEMPT -ge $MAX_SSH_ATTEMPTS ]; then
+        echo "ERROR: Could not establish SSH connection to master node after $MAX_SSH_ATTEMPTS attempts"
+        echo "Public IP: $MASTER_PUBLIC_IP"
+        echo "SSH key: $SSH_KEY_PATH"
+        exit 1
+      fi
+      
+      # Wait for API server to be accessible (check from within the master node)
+      echo "Testing master API server connectivity from within master node..."
+      ATTEMPT=0
+      MAX_API_ATTEMPTS=60
+      
+      while [ $ATTEMPT -lt $MAX_API_ATTEMPTS ]; do
+        # Check if k3s service is running and API is responding
+        if ssh -i "$SSH_KEY_PATH" \
+           -o StrictHostKeyChecking=no \
+           -o UserKnownHostsFile=/dev/null \
+           -o ConnectTimeout=5 \
+           -o BatchMode=yes \
+           ubuntu@"$MASTER_PUBLIC_IP" \
+           "sudo systemctl is-active --quiet k3s && sudo k3s kubectl get nodes > /dev/null 2>&1" 2>/dev/null; then
+          echo "Master API server is ready and responding!"
+          exit 0
+        fi
+        
+        ATTEMPT=$((ATTEMPT + 1))
+        echo "Master API not ready yet... (attempt $ATTEMPT/$MAX_API_ATTEMPTS)"
+        sleep 10
+      done
+      
+      echo "ERROR: Master API server not ready after $MAX_API_ATTEMPTS attempts"
+      echo "Checking k3s service status..."
+      ssh -i "$SSH_KEY_PATH" \
+          -o StrictHostKeyChecking=no \
+          -o UserKnownHostsFile=/dev/null \
+          -o BatchMode=yes \
+          ubuntu@"$MASTER_PUBLIC_IP" \
+          "sudo systemctl status k3s --no-pager -l || true" || true
+      exit 1
+    EOT
+  }
+
+  triggers = {
+    master_instance_id = aws_instance.k3s_master.id
+  }
+}
+
 # Launch template for worker nodes
 resource "aws_launch_template" "k3s_worker" {
   name_prefix   = "k3s-worker-prod-"
@@ -371,7 +526,10 @@ resource "aws_autoscaling_group" "k3s_workers" {
   max_size         = var.worker_desired_capacity
   desired_capacity = var.worker_desired_capacity
 
-  depends_on = [aws_instance.k3s_master]
+  depends_on = [
+    aws_instance.k3s_master,
+    null_resource.wait_for_master_ready
+  ]
 
   launch_template {
     id      = aws_launch_template.k3s_worker.id

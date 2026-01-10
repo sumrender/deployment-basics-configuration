@@ -514,14 +514,14 @@ main() {
     fi
     
     log_info "Master node private IP: ${master_ip}"
-    log_info "Configuring k3s to bind to private IP and include it in TLS certificate..."
+    log_info "Configuring k3s to bind to all interfaces and include private IP in TLS certificate..."
     
     # Install k3s as server with network configuration
-    # --bind-address: IP address to bind to
+    # --bind-address: IP address to bind to (0.0.0.0 listens on all interfaces)
     # --advertise-address: IP address to advertise to other nodes
     # --tls-san: Add IP to TLS certificate Subject Alternative Names
     # Note: --disable traefik is already included in install_k3s_binary function
-    install_k3s_binary "server" "--bind-address ${master_ip} --advertise-address ${master_ip} --tls-san ${master_ip}"
+    install_k3s_binary "server" "--bind-address 0.0.0.0 --advertise-address ${master_ip} --tls-san ${master_ip}"
     wait_for_k3s_ready
     
     # Store token and IP in Parameter Store
