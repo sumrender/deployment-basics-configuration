@@ -13,17 +13,6 @@ module "common" {
 data "aws_caller_identity" "current" {}
 
 
-# IAM instance profile
-resource "aws_iam_instance_profile" "ec2_k3s_profile" {
-  name = "ec2-k3s-profile-prod"
-  role = aws_iam_role.ec2_k3s_role.name
-
-  tags = {
-    Name        = "ec2-k3s-profile-prod"
-    Environment = "prod"
-  }
-}
-
 # Security group for master node
 resource "aws_security_group" "master_sg" {
   name        = "ec2-k3s-master-sg-prod"
@@ -250,7 +239,6 @@ resource "aws_instance" "k3s_master" {
   vpc_security_group_ids      = [aws_security_group.master_sg.id]
   subnet_id                   = module.common.default_subnet_id
   associate_public_ip_address = true
-  iam_instance_profile        = aws_iam_instance_profile.ec2_k3s_profile.name
 
   root_block_device {
     volume_size = 30
@@ -493,10 +481,6 @@ resource "aws_launch_template" "k3s_worker" {
   key_name      = module.common.ec2_key_pair_name
 
   vpc_security_group_ids = [aws_security_group.worker_sg.id]
-
-  iam_instance_profile {
-    name = aws_iam_instance_profile.ec2_k3s_profile.name
-  }
 
   block_device_mappings {
     device_name = "/dev/sda1"
