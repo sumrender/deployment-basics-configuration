@@ -12,60 +12,6 @@ module "common" {
 # Get current AWS account ID
 data "aws_caller_identity" "current" {}
 
-# IAM role for EC2 instances to access Parameter Store
-resource "aws_iam_role" "ec2_k3s_role" {
-  name = "ec2-k3s-role-prod"
-
-  assume_role_policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Action = "sts:AssumeRole"
-        Effect = "Allow"
-        Principal = {
-          Service = "ec2.amazonaws.com"
-        }
-      }
-    ]
-  })
-
-  tags = {
-    Name        = "ec2-k3s-role-prod"
-    Environment = "prod"
-  }
-}
-
-# IAM policy for Parameter Store access
-resource "aws_iam_role_policy" "ec2_parameter_store_policy" {
-  name = "ec2-parameter-store-policy-prod"
-  role = aws_iam_role.ec2_k3s_role.id
-
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Effect = "Allow"
-        Action = [
-          "ssm:DescribeParameters"
-        ]
-        Resource = "*"
-      },
-      {
-        Effect = "Allow"
-        Action = [
-          "ssm:GetParameter",
-          "ssm:PutParameter",
-          "ssm:GetParameters"
-        ]
-        Resource = [
-          "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter/${var.k3s_server_token_parameter_name}",
-          "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter/${var.k3s_master_ip_parameter_name}",
-          "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter/k3s/prod/*"
-        ]
-      }
-    ]
-  })
-}
 
 # IAM instance profile
 resource "aws_iam_instance_profile" "ec2_k3s_profile" {
@@ -239,7 +185,7 @@ set -e
 # Update system
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -y
-apt-get install -y curl ca-certificates awscli
+apt-get install -y curl ca-certificates
 
 # Download master setup script directly from GitHub (raw) and run it
 MASTER_SCRIPT="/tmp/setup-k3s-master-prod.sh"
@@ -260,9 +206,6 @@ REPO_URL="${var.github_repo_url}" \
 REPO_BRANCH="${var.github_repo_branch}" \
 K8S_ENV="prod" \
 ARGOCD_ADMIN_PASSWORD="${var.argocd_admin_password}" \
-K3S_TOKEN_PARAMETER_NAME="${var.k3s_server_token_parameter_name}" \
-K3S_MASTER_IP_PARAMETER_NAME="${var.k3s_master_ip_parameter_name}" \
-AWS_REGION="${var.aws_region}" \
 "$MASTER_SCRIPT"
 EOF
 
@@ -273,7 +216,7 @@ set -e
 # Update system
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -y
-apt-get install -y curl ca-certificates awscli
+apt-get install -y curl ca-certificates
 
 # Download worker setup script directly from GitHub (raw) and run it
 WORKER_SCRIPT="/tmp/setup-k3s-worker-prod.sh"
@@ -289,10 +232,12 @@ RAW_WORKER_URL="https://raw.githubusercontent.com/$${REPO_PATH}/${var.github_rep
 curl -fsSL -o "$WORKER_SCRIPT" "$RAW_WORKER_URL"
 chmod +x "$WORKER_SCRIPT"
 
-# Run the worker setup script
-K3S_TOKEN_PARAMETER_NAME="${var.k3s_server_token_parameter_name}" \
-K3S_MASTER_IP_PARAMETER_NAME="${var.k3s_master_ip_parameter_name}" \
-AWS_REGION="${var.aws_region}" \
+# Run the worker setup script with environment variables
+# Note: master-ip file is created by local_file resource (exists at plan time)
+#       k3s-token file is created by wait_for_master_ready provisioner (exists at apply time)
+#       Using try() to handle token/IP files not existing during initial plan
+K3S_MASTER_IP="${trimspace(try(file("${path.module}/.terraform/master-ip-prod.txt"), ""))}" \
+K3S_TOKEN="${trimspace(try(file("${path.module}/.terraform/k3s-token-prod.txt"), ""))}" \
 "$WORKER_SCRIPT"
 EOF
 }
@@ -331,7 +276,6 @@ resource "null_resource" "wait_for_master_ready" {
       echo "Waiting for master k3s API server to be ready..."
       echo "Using AWS profile: ${var.aws_profile}"
       echo "Using AWS region: ${var.aws_region}"
-      echo "Looking for parameter: ${var.k3s_master_ip_parameter_name}"
       
       # Set AWS profile and region
       export AWS_PROFILE="${var.aws_profile}"
@@ -343,48 +287,13 @@ resource "null_resource" "wait_for_master_ready" {
         exit 1
       fi
       
-      MAX_ATTEMPTS=60
-      ATTEMPT=0
-      MASTER_IP=""
-      
-      # Wait for master IP to be stored in Parameter Store
-      while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
-        MASTER_IP=$(aws ssm get-parameter \
-          --name "${var.k3s_master_ip_parameter_name}" \
-          --region "${var.aws_region}" \
-          --profile "${var.aws_profile}" \
-          --query 'Parameter.Value' \
-          --output text 2>&1)
-        
-        # Check if we got an actual IP (not an error message)
-        if echo "$MASTER_IP" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'; then
-          echo "Master IP found in Parameter Store: $MASTER_IP"
-          break
-        fi
-        
-        # Show error if it's not a "parameter not found" error (first few attempts)
-        if [ $ATTEMPT -lt 3 ] && echo "$MASTER_IP" | grep -qv "ParameterNotFound\|Parameter.*not found"; then
-          echo "Warning: $MASTER_IP"
-        fi
-        
-        ATTEMPT=$((ATTEMPT + 1))
-        echo "Waiting for master IP in Parameter Store... (attempt $ATTEMPT/$MAX_ATTEMPTS)"
-        sleep 20
-      done
-      
-      if ! echo "$MASTER_IP" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'; then
-        echo "ERROR: Master IP not found in Parameter Store after $MAX_ATTEMPTS attempts"
-        echo "Last response: $MASTER_IP"
-        echo ""
-        echo "Troubleshooting:"
-        echo "1. Check if parameter exists: aws ssm get-parameter --name ${var.k3s_master_ip_parameter_name} --region ${var.aws_region} --profile ${var.aws_profile}"
-        echo "2. Verify AWS profile is correct: ${var.aws_profile}"
-        exit 1
-      fi
+      # Get master private IP from instance resource
+      MASTER_IP="${aws_instance.k3s_master.private_ip}"
+      echo "Master private IP: $MASTER_IP"
       
       # Get master public IP for SSH
       echo "Retrieving master public IP for SSH access..."
-      MASTER_PUBLIC_IP=$(aws ec2 describe-instances \
+      MASTER_PUBLIC_IP=$$(aws ec2 describe-instances \
         --region "${var.aws_region}" \
         --profile "${var.aws_profile}" \
         --filters "Name=tag:Name,Values=ec2-k3s-master-prod" "Name=instance-state-name,Values=running" \
@@ -398,7 +307,6 @@ resource "null_resource" "wait_for_master_ready" {
       fi
       
       echo "Master public IP: $MASTER_PUBLIC_IP"
-      echo "Master private IP: $MASTER_IP"
       
       # Get SSH key path
       SSH_KEY_PATH="${module.common.private_key_file_path}"
@@ -424,7 +332,7 @@ resource "null_resource" "wait_for_master_ready" {
           echo "SSH connection established"
           break
         fi
-        SSH_ATTEMPT=$((SSH_ATTEMPT + 1))
+        SSH_ATTEMPT=$$((SSH_ATTEMPT + 1))
         echo "Waiting for SSH... (attempt $SSH_ATTEMPT/$MAX_SSH_ATTEMPTS)"
         sleep 10
       done
@@ -451,10 +359,60 @@ resource "null_resource" "wait_for_master_ready" {
            ubuntu@"$MASTER_PUBLIC_IP" \
            "sudo systemctl is-active --quiet k3s && sudo k3s kubectl get nodes > /dev/null 2>&1" 2>/dev/null; then
           echo "Master API server is ready and responding!"
+          
+          # Read k3s token from master node
+          echo "Reading k3s token from master node..."
+          K3S_TOKEN=$$(ssh -i "$SSH_KEY_PATH" \
+             -o StrictHostKeyChecking=no \
+             -o UserKnownHostsFile=/dev/null \
+             -o BatchMode=yes \
+             ubuntu@"$MASTER_PUBLIC_IP" \
+             "sudo cat /var/lib/rancher/k3s/server/node-token" 2>/dev/null)
+          
+          if [ -z "$K3S_TOKEN" ]; then
+            echo "ERROR: Failed to read k3s token from master node"
+            exit 1
+          fi
+          
+          # Trim any whitespace from token
+          K3S_TOKEN=$$(echo "$K3S_TOKEN" | tr -d '\r\n' | xargs)
+          
+          if [ -z "$K3S_TOKEN" ]; then
+            echo "ERROR: k3s token is empty after trimming"
+            exit 1
+          fi
+          
+          TOKEN_LENGTH=$${#K3S_TOKEN}
+          echo "Successfully read k3s token from master node (length: $TOKEN_LENGTH characters)"
+          
+          # Create .terraform directory if it doesn't exist
+          mkdir -p "${path.module}/.terraform"
+          
+          # Write token to local file
+          TOKEN_FILE="${path.module}/.terraform/k3s-token-prod.txt"
+          echo "$K3S_TOKEN" > "$TOKEN_FILE"
+          chmod 600 "$TOKEN_FILE"
+          
+          # Verify token was written correctly
+          if [ ! -f "$TOKEN_FILE" ]; then
+            echo "ERROR: Failed to create token file at $TOKEN_FILE"
+            exit 1
+          fi
+          
+          VERIFIED_TOKEN=$$(cat "$TOKEN_FILE" | tr -d '\r\n' | xargs)
+          if [ "$VERIFIED_TOKEN" != "$K3S_TOKEN" ]; then
+            echo "ERROR: Token verification failed - written token does not match read token"
+            exit 1
+          fi
+          
+          echo "✓ k3s token successfully stored to $TOKEN_FILE"
+          echo "  Token file permissions: $$(stat -c '%a' "$TOKEN_FILE" 2>/dev/null || stat -f '%A' "$TOKEN_FILE" 2>/dev/null)"
+          echo "  Token file size: $$(stat -c '%s' "$TOKEN_FILE" 2>/dev/null || stat -f '%z' "$TOKEN_FILE" 2>/dev/null) bytes"
+          
           exit 0
         fi
         
-        ATTEMPT=$((ATTEMPT + 1))
+        ATTEMPT=$$((ATTEMPT + 1))
         echo "Master API not ready yet... (attempt $ATTEMPT/$MAX_API_ATTEMPTS)"
         sleep 10
       done
@@ -475,6 +433,57 @@ resource "null_resource" "wait_for_master_ready" {
     master_instance_id = aws_instance.k3s_master.id
   }
 }
+
+# Write master IP to local file
+resource "local_file" "master_ip" {
+  depends_on = [aws_instance.k3s_master]
+  
+  content  = aws_instance.k3s_master.private_ip
+  filename = "${path.module}/.terraform/master-ip-prod.txt"
+  
+  file_permission = "0644"
+}
+
+# Log master IP storage
+resource "null_resource" "log_master_ip_storage" {
+  depends_on = [local_file.master_ip]
+  
+  provisioner "local-exec" {
+    command = <<-EOT
+      set -e
+      MASTER_IP_FILE="${path.module}/.terraform/master-ip-prod.txt"
+      
+      if [ ! -f "$MASTER_IP_FILE" ]; then
+        echo "ERROR: Master IP file not found at $MASTER_IP_FILE"
+        exit 1
+      fi
+      
+      MASTER_IP=$$(cat "$MASTER_IP_FILE" | tr -d '\r\n' | xargs)
+      
+      if [ -z "$MASTER_IP" ]; then
+        echo "ERROR: Master IP file is empty"
+        exit 1
+      fi
+      
+      # Validate IP format (basic check)
+      if ! echo "$MASTER_IP" | grep -qE '^([0-9]{1,3}\.){3}[0-9]{1,3}$'; then
+        echo "WARNING: Master IP format may be invalid: $MASTER_IP"
+      fi
+      
+      echo "✓ Master IP successfully stored to $MASTER_IP_FILE"
+      echo "  Master private IP: $MASTER_IP"
+      echo "  IP file permissions: $$(stat -c '%a' "$MASTER_IP_FILE" 2>/dev/null || stat -f '%A' "$MASTER_IP_FILE" 2>/dev/null)"
+      echo "  IP file size: $$(stat -c '%s' "$MASTER_IP_FILE" 2>/dev/null || stat -f '%z' "$MASTER_IP_FILE" 2>/dev/null) bytes"
+    EOT
+  }
+  
+  triggers = {
+    master_ip_file = local_file.master_ip.content
+  }
+}
+
+# Note: k3s token file is written by wait_for_master_ready provisioner
+# and will be read directly in worker_user_data using file() function
 
 # Launch template for worker nodes
 resource "aws_launch_template" "k3s_worker" {
@@ -526,15 +535,17 @@ resource "aws_autoscaling_group" "k3s_workers" {
   max_size         = var.worker_desired_capacity
   desired_capacity = var.worker_desired_capacity
 
-  depends_on = [
-    aws_instance.k3s_master,
-    null_resource.wait_for_master_ready
-  ]
-
   launch_template {
     id      = aws_launch_template.k3s_worker.id
     version = "$Latest"
   }
+
+  depends_on = [
+    aws_instance.k3s_master,
+    null_resource.wait_for_master_ready,
+    local_file.master_ip,
+    null_resource.log_master_ip_storage
+  ]
 
   tag {
     key                 = "Name"

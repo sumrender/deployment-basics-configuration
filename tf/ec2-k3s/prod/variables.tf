@@ -52,16 +52,3 @@ variable "argocd_admin_password" {
   sensitive   = true
   default     = "iacAdmin"
 }
-
-variable "k3s_server_token_parameter_name" {
-  description = "AWS Systems Manager Parameter Store name for k3s server token"
-  type        = string
-  default     = "/k3s/prod/server-token"
-}
-
-variable "k3s_master_ip_parameter_name" {
-  description = "AWS Systems Manager Parameter Store name for k3s master node IP"
-  type        = string
-  default     = "/k3s/prod/master-ip"
-}
-

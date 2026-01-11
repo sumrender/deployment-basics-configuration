@@ -4,17 +4,14 @@ set -euo pipefail
 ################################################################################
 # k3s Master Node Setup Script for Production
 # 
-# This script sets up a k3s master node, stores the server token in AWS
-# Parameter Store, installs ArgoCD, and configures it to deploy applications.
+# This script sets up a k3s master node, installs ArgoCD, and configures it
+# to deploy applications.
 #
 # Environment Variables:
 #   - K8S_ENV: Kubernetes environment name (default: prod)
 #   - REPO_URL: GitHub repository URL to clone
 #   - REPO_BRANCH: GitHub repository branch to clone
 #   - ARGOCD_ADMIN_PASSWORD: ArgoCD admin password (required)
-#   - K3S_TOKEN_PARAMETER_NAME: Parameter Store name for k3s server token
-#   - K3S_MASTER_IP_PARAMETER_NAME: Parameter Store name for master IP
-#   - AWS_REGION: AWS region for Parameter Store
 ################################################################################
 
 # Colors for output
@@ -28,9 +25,6 @@ REPO_URL="${REPO_URL:-https://github.com/sumrender/deployment-basics-configurati
 REPO_BRANCH="${REPO_BRANCH:-main}"
 REPO_DIR="${REPO_DIR:-/tmp/deployment-basics-configuration}"
 K8S_ENV="${K8S_ENV:-prod}"
-K3S_TOKEN_PARAMETER_NAME="${K3S_TOKEN_PARAMETER_NAME:-/k3s/prod/server-token}"
-K3S_MASTER_IP_PARAMETER_NAME="${K3S_MASTER_IP_PARAMETER_NAME:-/k3s/prod/master-ip}"
-AWS_REGION="${AWS_REGION:-ap-south-1}"
 
 # Source common installation functions
 COMMON_SCRIPT="/tmp/install-k3s-common.sh"
@@ -71,171 +65,6 @@ check_root() {
         log_error "This script must be run as root or with sudo"
         exit 1
     fi
-}
-
-# Verify AWS access and credentials
-verify_aws_access() {
-    log_info "Verifying AWS access and credentials..."
-    
-    # Check if AWS CLI is installed
-    if ! command -v aws &> /dev/null; then
-        log_error "AWS CLI is not installed or not in PATH"
-        exit 1
-    fi
-    
-    # Check if AWS CLI is configured
-    if ! aws --version &> /dev/null; then
-        log_error "AWS CLI is not working properly"
-        exit 1
-    fi
-    
-    # Verify IAM role credentials are available
-    log_info "Checking IAM role credentials..."
-    local identity_output
-    if ! identity_output=$(aws sts get-caller-identity --region "$AWS_REGION" 2>&1); then
-        log_error "Failed to get AWS caller identity"
-        log_error "AWS CLI error: $identity_output"
-        log_error "This usually means IAM instance profile is not attached or not ready yet"
-        exit 1
-    fi
-    
-    log_info "AWS credentials verified:"
-    echo "$identity_output" | grep -E "(UserId|Account|Arn)" || echo "$identity_output"
-    
-    # Test basic SSM access with describe operation
-    log_info "Testing SSM access..."
-    local ssm_test_output
-    if ! ssm_test_output=$(aws ssm describe-parameters --region "$AWS_REGION" --max-items 1 2>&1); then
-        log_warn "SSM describe-parameters test failed (this may be expected if no parameters exist)"
-        log_warn "Error: $ssm_test_output"
-        log_warn "Continuing anyway - this may indicate a permissions issue"
-    else
-        log_info "SSM access verified"
-    fi
-}
-
-# Store k3s server token in Parameter Store
-store_k3s_token() {
-    log_info "Storing k3s server token in Parameter Store..."
-    
-    local token_file="/var/lib/rancher/k3s/server/node-token"
-    if [[ ! -f "$token_file" ]]; then
-        log_error "k3s server token file not found at ${token_file}"
-        exit 1
-    fi
-    
-    local token
-    token=$(cat "$token_file")
-    
-    # Retry logic for IAM propagation delays
-    local max_attempts=3
-    local attempt=1
-    local delay=5
-    local error_output=""
-    
-    while [[ $attempt -le $max_attempts ]]; do
-        log_info "Attempt $attempt of $max_attempts to store k3s server token..."
-        
-        if error_output=$(aws ssm put-parameter \
-            --name "$K3S_TOKEN_PARAMETER_NAME" \
-            --value "$token" \
-            --type "SecureString" \
-            --region "$AWS_REGION" \
-            --overwrite 2>&1); then
-            log_info "k3s server token stored in Parameter Store: ${K3S_TOKEN_PARAMETER_NAME}"
-            
-            # Verify parameter was successfully stored
-            if aws ssm get-parameter \
-                --name "$K3S_TOKEN_PARAMETER_NAME" \
-                --region "$AWS_REGION" \
-                --with-decryption \
-                --query 'Parameter.Value' \
-                --output text &> /dev/null; then
-                log_info "Verified: Parameter successfully stored and retrievable"
-                return 0
-            else
-                log_warn "Parameter stored but verification failed (this may be expected)"
-            fi
-            return 0
-        else
-            log_warn "Attempt $attempt failed: $error_output"
-            if [[ $attempt -lt $max_attempts ]]; then
-                log_info "Retrying in ${delay} seconds..."
-                sleep $delay
-                delay=$((delay * 2))  # Exponential backoff
-            fi
-            attempt=$((attempt + 1))
-        fi
-    done
-    
-    log_error "Failed to store k3s server token in Parameter Store after $max_attempts attempts"
-    log_error "Last AWS CLI error: $error_output"
-    log_error "Parameter name: ${K3S_TOKEN_PARAMETER_NAME}"
-    log_error "Region: ${AWS_REGION}"
-    exit 1
-}
-
-# Store master IP in Parameter Store
-store_master_ip() {
-    log_info "Storing master node IP in Parameter Store..."
-    
-    local master_ip
-    master_ip=$(curl -s http://169.254.169.254/latest/meta-data/local-ipv4)
-    
-    if [[ -z "$master_ip" ]]; then
-        log_error "Failed to retrieve master node IP"
-        exit 1
-    fi
-    
-    # Retry logic for IAM propagation delays
-    local max_attempts=3
-    local attempt=1
-    local delay=5
-    local error_output=""
-    
-    while [[ $attempt -le $max_attempts ]]; do
-        log_info "Attempt $attempt of $max_attempts to store master IP..."
-        
-        if error_output=$(aws ssm put-parameter \
-            --name "$K3S_MASTER_IP_PARAMETER_NAME" \
-            --value "$master_ip" \
-            --type "String" \
-            --region "$AWS_REGION" \
-            --overwrite 2>&1); then
-            log_info "Master node IP stored in Parameter Store: ${K3S_MASTER_IP_PARAMETER_NAME} = ${master_ip}"
-            
-            # Verify parameter was successfully stored
-            local retrieved_ip
-            if retrieved_ip=$(aws ssm get-parameter \
-                --name "$K3S_MASTER_IP_PARAMETER_NAME" \
-                --region "$AWS_REGION" \
-                --query 'Parameter.Value' \
-                --output text 2>&1); then
-                if [[ "$retrieved_ip" == "$master_ip" ]]; then
-                    log_info "Verified: Parameter successfully stored and matches"
-                else
-                    log_warn "Parameter stored but retrieved value doesn't match (expected: $master_ip, got: $retrieved_ip)"
-                fi
-            else
-                log_warn "Parameter stored but verification failed: $retrieved_ip"
-            fi
-            return 0
-        else
-            log_warn "Attempt $attempt failed: $error_output"
-            if [[ $attempt -lt $max_attempts ]]; then
-                log_info "Retrying in ${delay} seconds..."
-                sleep $delay
-                delay=$((delay * 2))  # Exponential backoff
-            fi
-            attempt=$((attempt + 1))
-        fi
-    done
-    
-    log_error "Failed to store master node IP in Parameter Store after $max_attempts attempts"
-    log_error "Last AWS CLI error: $error_output"
-    log_error "Parameter name: ${K3S_MASTER_IP_PARAMETER_NAME}"
-    log_error "Region: ${AWS_REGION}"
-    exit 1
 }
 
 # Set ArgoCD admin password
@@ -496,9 +325,6 @@ main() {
     
     check_root
     
-    # Verify AWS access before proceeding
-    verify_aws_access
-    
     # Install prerequisites
     install_k3s_prerequisites
     set_es_kernel_param
@@ -523,10 +349,6 @@ main() {
     # Note: --disable traefik is already included in install_k3s_binary function
     install_k3s_binary "server" "--bind-address 0.0.0.0 --advertise-address ${master_ip} --tls-san ${master_ip}"
     wait_for_k3s_ready
-    
-    # Store token and IP in Parameter Store
-    store_k3s_token
-    store_master_ip
     
     # Configure kubeconfig
     configure_kubeconfig

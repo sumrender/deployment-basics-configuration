@@ -5,12 +5,11 @@ set -euo pipefail
 # k3s Worker Node Setup Script for Production
 # 
 # This script sets up a k3s worker node that joins an existing k3s cluster
-# by retrieving the server token and master IP from AWS Parameter Store.
+# using the server token and master IP provided as environment variables.
 #
 # Environment Variables:
-#   - K3S_TOKEN_PARAMETER_NAME: Parameter Store name for k3s server token
-#   - K3S_MASTER_IP_PARAMETER_NAME: Parameter Store name for master IP
-#   - AWS_REGION: AWS region for Parameter Store
+#   - K3S_TOKEN: k3s server token (required)
+#   - K3S_MASTER_IP: Master node IP address (required)
 ################################################################################
 
 # Colors for output
@@ -19,10 +18,7 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
-# Configuration
-K3S_TOKEN_PARAMETER_NAME="${K3S_TOKEN_PARAMETER_NAME:-/k3s/prod/server-token}"
-K3S_MASTER_IP_PARAMETER_NAME="${K3S_MASTER_IP_PARAMETER_NAME:-/k3s/prod/master-ip}"
-AWS_REGION="${AWS_REGION:-ap-south-1}"
+# Configuration - values come from environment variables
 
 # Source common installation functions
 COMMON_SCRIPT="/tmp/install-k3s-common.sh"
@@ -69,80 +65,6 @@ check_root() {
     fi
 }
 
-# Retrieve k3s server token from Parameter Store
-get_k3s_token() {
-    log_info "Retrieving k3s server token from Parameter Store..."
-    
-    local token
-    local max_retries=30
-    local retry_count=0
-    
-    # Wait for master to store the token (with retries)
-    while [[ $retry_count -lt $max_retries ]]; do
-        if token=$(aws ssm get-parameter \
-            --name "$K3S_TOKEN_PARAMETER_NAME" \
-            --with-decryption \
-            --region "$AWS_REGION" \
-            --query 'Parameter.Value' \
-            --output text 2>/dev/null); then
-            if [[ -n "$token" && "$token" != "None" ]]; then
-                log_info "k3s server token retrieved from Parameter Store"
-                echo "$token"
-                return 0
-            fi
-        fi
-        
-        retry_count=$((retry_count + 1))
-        log_info "Waiting for master node to store token... (attempt $retry_count/$max_retries)"
-        sleep 10
-    done
-    
-    log_error "Failed to retrieve k3s server token from Parameter Store after ${max_retries} attempts"
-    log_error "Troubleshooting steps:"
-    log_error "  1. Verify the master node has completed setup"
-    log_error "  2. Check AWS Parameter Store: ${K3S_TOKEN_PARAMETER_NAME}"
-    log_error "  3. Verify IAM permissions for Parameter Store access"
-    log_error "  4. Check AWS region: ${AWS_REGION}"
-    log_error "  5. Review master node logs to ensure token was stored"
-    exit 1
-}
-
-# Retrieve master IP from Parameter Store
-get_master_ip() {
-    log_info "Retrieving master node IP from Parameter Store..."
-    
-    local master_ip
-    local max_retries=30
-    local retry_count=0
-    
-    # Wait for master to store the IP (with retries)
-    while [[ $retry_count -lt $max_retries ]]; do
-        if master_ip=$(aws ssm get-parameter \
-            --name "$K3S_MASTER_IP_PARAMETER_NAME" \
-            --region "$AWS_REGION" \
-            --query 'Parameter.Value' \
-            --output text 2>/dev/null); then
-            if [[ -n "$master_ip" && "$master_ip" != "None" ]]; then
-                log_info "Master node IP retrieved from Parameter Store: ${master_ip}"
-                echo "$master_ip"
-                return 0
-            fi
-        fi
-        
-        retry_count=$((retry_count + 1))
-        log_info "Waiting for master node to store IP... (attempt $retry_count/$max_retries)"
-        sleep 10
-    done
-    
-    log_error "Failed to retrieve master node IP from Parameter Store after ${max_retries} attempts"
-    log_error "Troubleshooting steps:"
-    log_error "  1. Verify the master node has completed setup"
-    log_error "  2. Check AWS Parameter Store: ${K3S_MASTER_IP_PARAMETER_NAME}"
-    log_error "  3. Verify IAM permissions for Parameter Store access"
-    log_error "  4. Check AWS region: ${AWS_REGION}"
-    log_error "  5. Review master node logs to ensure IP was stored"
-    exit 1
-}
 
 # Wait for node to join cluster
 # Usage: wait_for_node_ready <master_ip>
@@ -298,12 +220,39 @@ main() {
     install_k3s_prerequisites
     set_es_kernel_param
     
-    # Retrieve token and master IP from Parameter Store
-    local k3s_token
-    k3s_token=$(get_k3s_token)
+    # Get token from environment variable
+    if [[ -z "${K3S_TOKEN:-}" ]]; then
+        log_error "K3S_TOKEN environment variable is required"
+        exit 1
+    fi
+    local k3s_token="$K3S_TOKEN"
     
-    local master_ip
-    master_ip=$(get_master_ip)
+    # Validate token is not empty (already checked above, but double-check after trimming)
+    if [[ -z "$(echo "$k3s_token" | tr -d '[:space:]')" ]]; then
+        log_error "K3S_TOKEN is empty or contains only whitespace"
+        log_error "This indicates the token file was not properly created."
+        log_error "The master node may not be ready yet, or there was an issue retrieving the token."
+        log_error "Please ensure the master node is fully provisioned and the token file exists."
+        exit 1
+    fi
+    
+    log_info "k3s server token provided via environment variable"
+    
+    # Get master IP from environment variable
+    if [[ -z "${K3S_MASTER_IP:-}" ]]; then
+        log_error "K3S_MASTER_IP environment variable is required"
+        exit 1
+    fi
+    local master_ip="$K3S_MASTER_IP"
+    
+    # Validate master IP is not empty
+    if [[ -z "$master_ip" || "$master_ip" == "" ]]; then
+        log_error "K3S_MASTER_IP environment variable is empty or not set"
+        log_error "This indicates the master IP file was not properly created."
+        exit 1
+    fi
+    
+    log_info "Master node IP provided via environment variable: ${master_ip}"
     
     # Verify master is ready before attempting installation
     log_info "Verifying master node readiness before agent installation..."

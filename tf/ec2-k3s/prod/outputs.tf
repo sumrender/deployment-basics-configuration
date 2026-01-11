@@ -33,13 +33,3 @@ output "argocd_url" {
   value       = "http://${aws_instance.k3s_master.public_ip}:30033"
 }
 
-output "k3s_token_parameter_name" {
-  description = "Parameter Store name for k3s server token"
-  value       = var.k3s_server_token_parameter_name
-}
-
-output "k3s_master_ip_parameter_name" {
-  description = "Parameter Store name for k3s master IP"
-  value       = var.k3s_master_ip_parameter_name
-}
-
