@@ -62,6 +62,12 @@ log_error() {
     echo -e "${RED}[ERROR]${NC} [${timestamp}] $message"
 }
 
+# Fetch IMDSv2 token
+get_imds_token() {
+    curl -s -X PUT "http://169.254.169.254/latest/api/token" \
+        -H "X-aws-ec2-metadata-token-ttl-seconds: 21600"
+}
+
 # Check if running as root
 check_root() {
     if [[ $EUID -ne 0 ]]; then
@@ -284,7 +290,9 @@ write_to_ssm() {
     
     # Get AWS region from instance metadata
     local aws_region
-    if ! aws_region=$(curl -s --connect-timeout 2 http://169.254.169.254/latest/meta-data/placement/region 2>/dev/null); then
+    if ! aws_region=$(curl -s --connect-timeout 2 \
+        -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" \
+        http://169.254.169.254/latest/meta-data/placement/region 2>/dev/null); then
         log_error "Failed to retrieve AWS region from instance metadata"
         exit 1
     fi
@@ -309,7 +317,9 @@ write_to_ssm() {
     
     # Get master private IP from instance metadata
     local master_ip
-    if ! master_ip=$(curl -s --connect-timeout 2 http://169.254.169.254/latest/meta-data/local-ipv4 2>/dev/null); then
+    if ! master_ip=$(curl -s --connect-timeout 2 \
+        -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" \
+        http://169.254.169.254/latest/meta-data/local-ipv4 2>/dev/null); then
         log_error "Failed to retrieve master private IP from instance metadata"
         exit 1
     fi
@@ -454,6 +464,14 @@ main() {
     log_info "Kubernetes environment: ${K8S_ENV}"
     echo ""
     
+    # Acquire IMDSv2 token at script start
+    IMDS_TOKEN="$(get_imds_token)"
+    
+    if [[ -z "$IMDS_TOKEN" ]]; then
+        log_error "Failed to acquire IMDSv2 token"
+        exit 1
+    fi
+    
     check_root
     
     # Install prerequisites
@@ -463,7 +481,9 @@ main() {
     # Get private IP before installing k3s (needed for network configuration)
     log_info "Retrieving master node private IP..."
     local master_ip
-    master_ip=$(curl -s http://169.254.169.254/latest/meta-data/local-ipv4)
+    master_ip=$(curl -s \
+        -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" \
+        http://169.254.169.254/latest/meta-data/local-ipv4)
     
     if [[ -z "$master_ip" ]]; then
         log_error "Failed to retrieve master node private IP"
@@ -508,8 +528,8 @@ main() {
     
     log_info "Master node setup complete!"
     echo ""
-    log_info "Master node IP: $(curl -s http://169.254.169.254/latest/meta-data/public-ipv4)"
-    log_info "Access ArgoCD UI at: http://$(curl -s http://169.254.169.254/latest/meta-data/public-ipv4):30033"
+    log_info "Master node IP: $(curl -s -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" http://169.254.169.254/latest/meta-data/public-ipv4)"
+    log_info "Access ArgoCD UI at: http://$(curl -s -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" http://169.254.169.254/latest/meta-data/public-ipv4):30033"
 }
 
 # Run main function

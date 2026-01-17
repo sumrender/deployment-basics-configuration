@@ -12,6 +12,17 @@ module "common" {
 # Get current AWS account ID
 data "aws_caller_identity" "current" {}
 
+# Precompute GitHub repository path for raw.githubusercontent.com URLs
+locals {
+  repo_path = replace(
+    replace(
+      replace(var.github_repo_url, "https://github.com/", ""),
+      "http://github.com/", ""
+    ),
+    ".git", ""
+  )
+}
+
 # IAM role for master node (write to SSM)
 resource "aws_iam_role" "k3s_master" {
   name = "k3s-master-role-prod"
@@ -321,14 +332,7 @@ apt-get install -y curl ca-certificates
 # Download master setup script directly from GitHub (raw) and run it
 MASTER_SCRIPT="/tmp/setup-k3s-master-prod.sh"
 
-# Convert repo URL into "owner/repo" for raw.githubusercontent.com
-REPO_PATH="${var.github_repo_url}"
-REPO_PATH="$${REPO_PATH#https://github.com/}"
-REPO_PATH="$${REPO_PATH#http://github.com/}"
-REPO_PATH="$${REPO_PATH#git@github.com:}"
-REPO_PATH="$${REPO_PATH%.git}"
-
-RAW_MASTER_URL="https://raw.githubusercontent.com/$${REPO_PATH}/${var.github_repo_branch}/tf/ec2-k3s/prod/scripts/setup-k3s-master-prod.sh"
+RAW_MASTER_URL="https://raw.githubusercontent.com/${local.repo_path}/${var.github_repo_branch}/tf/ec2-k3s/prod/scripts/setup-k3s-master-prod.sh"
 curl -fsSL -o "$MASTER_SCRIPT" "$RAW_MASTER_URL"
 chmod +x "$MASTER_SCRIPT"
 
@@ -352,14 +356,7 @@ apt-get install -y curl ca-certificates
 # Download worker setup script directly from GitHub (raw) and run it
 WORKER_SCRIPT="/tmp/setup-k3s-worker-prod.sh"
 
-# Convert repo URL into "owner/repo" for raw.githubusercontent.com
-REPO_PATH="${var.github_repo_url}"
-REPO_PATH="$${REPO_PATH#https://github.com/}"
-REPO_PATH="$${REPO_PATH#http://github.com/}"
-REPO_PATH="$${REPO_PATH#git@github.com:}"
-REPO_PATH="$${REPO_PATH%.git}"
-
-RAW_WORKER_URL="https://raw.githubusercontent.com/$${REPO_PATH}/${var.github_repo_branch}/tf/ec2-k3s/prod/scripts/setup-k3s-worker-prod.sh"
+RAW_WORKER_URL="https://raw.githubusercontent.com/${local.repo_path}/${var.github_repo_branch}/tf/ec2-k3s/prod/scripts/setup-k3s-worker-prod.sh"
 curl -fsSL -o "$WORKER_SCRIPT" "$RAW_WORKER_URL"
 chmod +x "$WORKER_SCRIPT"
 
@@ -380,9 +377,19 @@ resource "aws_instance" "k3s_master" {
   associate_public_ip_address = true
   iam_instance_profile        = aws_iam_instance_profile.k3s_master.name
 
+  depends_on = [
+    aws_iam_instance_profile.k3s_master,
+    aws_iam_role_policy.k3s_master_ssm
+  ]
+
   root_block_device {
     volume_size = 30
     volume_type = "gp3"
+  }
+
+  metadata_options {
+    http_endpoint = "enabled"
+    http_tokens   = "required"
   }
 
   user_data = local.master_user_data
@@ -394,157 +401,59 @@ resource "aws_instance" "k3s_master" {
   }
 }
 
-# Wait for master k3s API server to be ready
+# Wait for master k3s to write SSM parameters
 resource "null_resource" "wait_for_master_ready" {
-  depends_on = [aws_instance.k3s_master]
+  depends_on = [
+    aws_instance.k3s_master,
+    aws_iam_role_policy.k3s_master_ssm
+  ]
 
   provisioner "local-exec" {
+    interpreter = ["/bin/bash", "-c"]
+
     command = <<-EOT
       set -e
-      echo "Waiting for master k3s API server to be ready..."
+      echo "Waiting for master k3s to write SSM parameters..."
       echo "Using AWS profile: ${var.aws_profile}"
       echo "Using AWS region: ${var.aws_region}"
       
-      # Set AWS profile and region
       export AWS_PROFILE="${var.aws_profile}"
       export AWS_DEFAULT_REGION="${var.aws_region}"
       
-      # Verify AWS credentials
-      if ! aws sts get-caller-identity --region "${var.aws_region}" > /dev/null 2>&1; then
-        echo "ERROR: AWS credentials not configured or invalid for profile: ${var.aws_profile}"
-        exit 1
-      fi
+      TOKEN_PARAM="/k3s/prod/token"
+      MASTER_IP_PARAM="/k3s/prod/master-ip"
       
-      # Get master private IP from instance resource
-      MASTER_IP="${aws_instance.k3s_master.private_ip}"
-      echo "Master private IP: $MASTER_IP"
-      
-      # Get master public IP for SSH
-      echo "Retrieving master public IP for SSH access..."
-      MASTER_PUBLIC_IP=$$(aws ec2 describe-instances \
-        --region "${var.aws_region}" \
-        --profile "${var.aws_profile}" \
-        --filters "Name=tag:Name,Values=ec2-k3s-master-prod" "Name=instance-state-name,Values=running" \
-        --query 'Reservations[0].Instances[0].PublicIpAddress' \
-        --output text 2>&1)
-      
-      if [ -z "$MASTER_PUBLIC_IP" ] || [ "$MASTER_PUBLIC_IP" = "None" ] || [ "$MASTER_PUBLIC_IP" = "null" ]; then
-        echo "ERROR: Could not retrieve master public IP"
-        echo "Attempted to query instance with tag Name=ec2-k3s-master-prod"
-        exit 1
-      fi
-      
-      echo "Master public IP: $MASTER_PUBLIC_IP"
-      
-      # Get SSH key path
-      SSH_KEY_PATH="${module.common.private_key_file_path}"
-      if [ ! -f "$SSH_KEY_PATH" ]; then
-        echo "ERROR: SSH key not found at $SSH_KEY_PATH"
-        exit 1
-      fi
-      
-      chmod 400 "$SSH_KEY_PATH"
-      
-      # Wait for SSH to be available
-      echo "Waiting for SSH to be available on master node..."
-      SSH_ATTEMPT=0
-      MAX_SSH_ATTEMPTS=30
-      while [ $SSH_ATTEMPT -lt $MAX_SSH_ATTEMPTS ]; do
-        if ssh -i "$SSH_KEY_PATH" \
-           -o StrictHostKeyChecking=no \
-           -o UserKnownHostsFile=/dev/null \
-           -o ConnectTimeout=5 \
-           -o BatchMode=yes \
-           ubuntu@"$MASTER_PUBLIC_IP" \
-           "echo 'SSH connection successful'" > /dev/null 2>&1; then
-          echo "SSH connection established"
-          break
-        fi
-        SSH_ATTEMPT=$$((SSH_ATTEMPT + 1))
-        echo "Waiting for SSH... (attempt $SSH_ATTEMPT/$MAX_SSH_ATTEMPTS)"
-        sleep 10
-      done
-      
-      if [ $SSH_ATTEMPT -ge $MAX_SSH_ATTEMPTS ]; then
-        echo "ERROR: Could not establish SSH connection to master node after $MAX_SSH_ATTEMPTS attempts"
-        echo "Public IP: $MASTER_PUBLIC_IP"
-        echo "SSH key: $SSH_KEY_PATH"
-        exit 1
-      fi
-      
-      # Wait for API server to be accessible (check from within the master node)
-      echo "Testing master API server connectivity from within master node..."
       ATTEMPT=0
-      MAX_API_ATTEMPTS=60
+      MAX_ATTEMPTS=90  # 15 minutes with 10s intervals
       
-      while [ $ATTEMPT -lt $MAX_API_ATTEMPTS ]; do
-        # Check if k3s service is running and API is responding
-        if ssh -i "$SSH_KEY_PATH" \
-           -o StrictHostKeyChecking=no \
-           -o UserKnownHostsFile=/dev/null \
-           -o ConnectTimeout=5 \
-           -o BatchMode=yes \
-           ubuntu@"$MASTER_PUBLIC_IP" \
-           "sudo systemctl is-active --quiet k3s && sudo k3s kubectl get nodes > /dev/null 2>&1" 2>/dev/null; then
-          echo "Master API server is ready and responding!"
+      while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
+        TOKEN_VALUE=$(aws ssm get-parameter \
+          --name "$TOKEN_PARAM" \
+          --with-decryption \
+          --query 'Parameter.Value' \
+          --output text 2>/dev/null || echo "")
+        
+        MASTER_IP_VALUE=$(aws ssm get-parameter \
+          --name "$MASTER_IP_PARAM" \
+          --query 'Parameter.Value' \
+          --output text 2>/dev/null || echo "")
+        
+        if [ -n "$TOKEN_VALUE" ] && [ "$TOKEN_VALUE" != "placeholder-will-be-updated-by-master-node" ] && \
+           [ -n "$MASTER_IP_VALUE" ] && [ "$MASTER_IP_VALUE" != "placeholder-will-be-updated-by-master-node" ]; then
+          echo "✓ SSM parameters are set:"
+          echo "  - $MASTER_IP_PARAM=$MASTER_IP_VALUE"
+          echo "  - $TOKEN_PARAM=(retrieved, length $${#TOKEN_VALUE})"
 
-          echo "Verifying SSM parameters are written by master node..."
-          TOKEN_PARAM="/k3s/prod/token"
-          MASTER_IP_PARAM="/k3s/prod/master-ip"
-
-          VERIFY_ATTEMPT=0
-          MAX_VERIFY_ATTEMPTS=60
-
-          while [ $VERIFY_ATTEMPT -lt $MAX_VERIFY_ATTEMPTS ]; do
-            TOKEN_VALUE=$$(aws ssm get-parameter \
-              --region "${var.aws_region}" \
-              --profile "${var.aws_profile}" \
-              --name "$$TOKEN_PARAM" \
-              --with-decryption \
-              --query 'Parameter.Value' \
-              --output text 2>/dev/null || true)
-
-            MASTER_IP_VALUE=$$(aws ssm get-parameter \
-              --region "${var.aws_region}" \
-              --profile "${var.aws_profile}" \
-              --name "$$MASTER_IP_PARAM" \
-              --query 'Parameter.Value' \
-              --output text 2>/dev/null || true)
-
-            if [ -n "$$TOKEN_VALUE" ] && [ "$$TOKEN_VALUE" != "placeholder-will-be-updated-by-master-node" ] && \
-               [ -n "$$MASTER_IP_VALUE" ] && [ "$$MASTER_IP_VALUE" != "placeholder-will-be-updated-by-master-node" ]; then
-              echo "✓ SSM parameters are set:"
-              echo "  - $$MASTER_IP_PARAM=$$MASTER_IP_VALUE"
-              echo "  - $$TOKEN_PARAM=(retrieved, length $${#TOKEN_VALUE})"
-              exit 0
-            fi
-
-            VERIFY_ATTEMPT=$$((VERIFY_ATTEMPT + 1))
-            echo "SSM parameters not ready yet... (attempt $$VERIFY_ATTEMPT/$$MAX_VERIFY_ATTEMPTS)"
-            sleep 10
-          done
-
-          echo "ERROR: SSM parameters were not updated after $$MAX_VERIFY_ATTEMPTS attempts"
-          echo "This usually means the master bootstrap script failed to write to SSM."
-          echo "Check cloud-init logs on the master node:"
-          echo "  sudo tail -n 200 /var/log/cloud-init-output.log"
-          exit 1
           exit 0
         fi
         
-        ATTEMPT=$$((ATTEMPT + 1))
-        echo "Master API not ready yet... (attempt $ATTEMPT/$MAX_API_ATTEMPTS)"
+        ATTEMPT=$((ATTEMPT + 1))
+        echo "SSM parameters not ready yet... (attempt $ATTEMPT/$MAX_ATTEMPTS)"
         sleep 10
       done
       
-      echo "ERROR: Master API server not ready after $MAX_API_ATTEMPTS attempts"
-      echo "Checking k3s service status..."
-      ssh -i "$SSH_KEY_PATH" \
-          -o StrictHostKeyChecking=no \
-          -o UserKnownHostsFile=/dev/null \
-          -o BatchMode=yes \
-          ubuntu@"$MASTER_PUBLIC_IP" \
-          "sudo systemctl status k3s --no-pager -l || true" || true
+      echo "ERROR: SSM parameters were not updated after $MAX_ATTEMPTS attempts"
+      echo "This usually means the master bootstrap script failed to write to SSM."
       exit 1
     EOT
   }
@@ -566,12 +475,22 @@ resource "aws_launch_template" "k3s_worker" {
 
   vpc_security_group_ids = [aws_security_group.worker_sg.id]
 
+  depends_on = [
+    aws_iam_instance_profile.k3s_worker,
+    aws_iam_role_policy.k3s_worker_ssm
+  ]
+
   block_device_mappings {
     device_name = "/dev/sda1"
     ebs {
       volume_size = 30
       volume_type = "gp3"
     }
+  }
+
+  metadata_options {
+    http_endpoint = "enabled"
+    http_tokens   = "required"
   }
 
   user_data = base64encode(local.worker_user_data)

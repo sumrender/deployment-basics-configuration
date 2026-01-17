@@ -63,6 +63,12 @@ log_error() {
     echo -e "${RED}[ERROR]${NC} [${timestamp}] $message"
 }
 
+# Fetch IMDSv2 token
+get_imds_token() {
+    curl -s -X PUT "http://169.254.169.254/latest/api/token" \
+        -H "X-aws-ec2-metadata-token-ttl-seconds: 21600"
+}
+
 # Check if running as root
 check_root() {
     if [[ $EUID -ne 0 ]]; then
@@ -221,7 +227,9 @@ retrieve_from_ssm() {
     
     # Get AWS region from instance metadata
     local aws_region
-    if ! aws_region=$(curl -s --connect-timeout 2 http://169.254.169.254/latest/meta-data/placement/region 2>/dev/null); then
+    if ! aws_region=$(curl -s --connect-timeout 2 \
+        -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" \
+        http://169.254.169.254/latest/meta-data/placement/region 2>/dev/null); then
         log_error "Failed to retrieve AWS region from instance metadata"
         exit 1
     fi
@@ -346,6 +354,14 @@ retrieve_from_ssm() {
 main() {
     log_info "Starting k3s worker node setup for production..."
     echo ""
+    
+    # Acquire IMDSv2 token at script start
+    IMDS_TOKEN="$(get_imds_token)"
+    
+    if [[ -z "$IMDS_TOKEN" ]]; then
+        log_error "Failed to acquire IMDSv2 token"
+        exit 1
+    fi
     
     check_root
     
