@@ -500,6 +500,9 @@ main() {
     # Note: --disable traefik is already included in install_k3s_binary function
     install_k3s_binary "server" "--bind-address 0.0.0.0 --advertise-address ${master_ip} --tls-san ${master_ip}"
     wait_for_k3s_ready
+
+    # Write token and IP to SSM Parameter Store
+    write_to_ssm
     
     # Configure kubeconfig
     configure_kubeconfig
@@ -522,9 +525,6 @@ main() {
     
     # Wait for sync
     wait_for_argocd_sync
-    
-    # Write token and IP to SSM Parameter Store
-    write_to_ssm
     
     log_info "Master node setup complete!"
     echo ""
