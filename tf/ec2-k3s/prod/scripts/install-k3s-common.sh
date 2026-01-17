@@ -50,8 +50,23 @@ install_k3s_prerequisites() {
         AWS_CLI_TMP="/tmp/awscli.tar.gz"
         AWS_CLI_INSTALL_DIR="/usr/local/aws-cli"
         
+        # Detect CPU architecture for AWS CLI download
+        ARCH="$(uname -m)"
+        case "$ARCH" in
+          x86_64)
+            AWSCLI_URL="https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip"
+            ;;
+          aarch64|arm64)
+            AWSCLI_URL="https://awscli.amazonaws.com/awscli-exe-linux-aarch64.zip"
+            ;;
+          *)
+            log_error "Unsupported architecture for AWS CLI: $ARCH"
+            exit 1
+            ;;
+        esac
+        
         # Download AWS CLI v2
-        if ! curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscliv2.zip; then
+        if ! curl -fsSL "$AWSCLI_URL" -o /tmp/awscliv2.zip; then
             log_error "Failed to download AWS CLI v2"
             exit 1
         fi
@@ -72,9 +87,23 @@ install_k3s_prerequisites() {
         
         log_info "AWS CLI v2 installed successfully"
     else
-        AWS_CLI_VERSION=$(aws --version 2>&1 | head -n1)
-        log_info "AWS CLI already installed: $AWS_CLI_VERSION"
+        log_info "AWS CLI already installed"
     fi
+    
+    # Verify AWS CLI binary exists and is executable
+    AWS_BIN="/usr/local/bin/aws"
+    
+    if [[ ! -x "$AWS_BIN" ]]; then
+        log_error "AWS CLI binary not found at expected path: $AWS_BIN"
+        log_error "Searching for aws binary..."
+        find /usr/local -name aws 2>/dev/null | head -n 10 || true
+        exit 1
+    fi
+    
+    # Export AWS_BIN for use in calling scripts
+    export AWS_BIN
+    AWS_CLI_VERSION=$("$AWS_BIN" --version 2>&1 | head -n1)
+    log_info "AWS CLI verified at: $AWS_BIN ($AWS_CLI_VERSION)"
     
     log_info "Prerequisites installed"
 }

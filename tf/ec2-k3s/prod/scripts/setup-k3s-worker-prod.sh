@@ -1,10 +1,6 @@
 #!/bin/bash
 set -euo pipefail
 
-# Ensure AWS CLI is in PATH (cloud-init does not always load /usr/local/bin)
-export PATH="/usr/local/bin:/usr/bin:/bin:/usr/local/aws-cli/v2/current/bin:$PATH"
-hash -r
-
 ################################################################################
 # k3s Worker Node Setup Script for Production
 # 
@@ -229,6 +225,9 @@ install_k3s_agent_with_retry() {
 retrieve_from_ssm() {
     log_info "Retrieving k3s token and master IP from SSM Parameter Store..."
     
+    # Ensure AWS_BIN is set
+    : "${AWS_BIN:?AWS_BIN is not set – AWS CLI not initialized}"
+    
     # Get AWS region from instance metadata
     local aws_region
     if ! aws_region=$(curl -s --connect-timeout 2 \
@@ -240,23 +239,20 @@ retrieve_from_ssm() {
     
     log_info "AWS region: ${aws_region}"
     
-    # Verify AWS CLI is available
-    if ! command -v aws &> /dev/null; then
-        log_error "AWS CLI not found in PATH"
-        log_error "PATH=$PATH"
-        log_error "Looking for aws binary..."
-        find /usr/local -name aws 2>/dev/null | head -n 5 || true
+    # Verify AWS CLI binary is available
+    if ! [[ -x "$AWS_BIN" ]]; then
+        log_error "AWS CLI binary not found or not executable: $AWS_BIN"
         exit 1
     fi
     
     # Verify IAM role credentials are available
-    if ! aws sts get-caller-identity --region "${aws_region}" > /dev/null 2>&1; then
+    if ! "$AWS_BIN" sts get-caller-identity --region "${aws_region}" > /dev/null 2>&1; then
         log_error "AWS credentials not available. Check IAM instance profile."
         exit 1
     fi
     
     local caller_identity
-    caller_identity=$(aws sts get-caller-identity --region "${aws_region}" --output json 2>/dev/null)
+    caller_identity=$("$AWS_BIN" sts get-caller-identity --region "${aws_region}" --output json 2>/dev/null)
     log_info "AWS credentials verified: $(echo "$caller_identity" | grep -o '"Arn": "[^"]*' | cut -d'"' -f4)"
     
     # SSM parameter names
@@ -283,7 +279,7 @@ retrieve_from_ssm() {
         
         # Retrieve master IP
         log_info "Retrieving master IP from SSM: ${master_ip_param} (attempt ${retry_count})"
-        master_ip=$(aws ssm get-parameter \
+        master_ip=$("$AWS_BIN" ssm get-parameter \
             --region "${aws_region}" \
             --name "${master_ip_param}" \
             --query 'Parameter.Value' \
@@ -291,7 +287,7 @@ retrieve_from_ssm() {
         
         # Retrieve token
         log_info "Retrieving k3s token from SSM: ${token_param} (attempt ${retry_count})"
-        k3s_token=$(aws ssm get-parameter \
+        k3s_token=$("$AWS_BIN" ssm get-parameter \
             --region "${aws_region}" \
             --name "${token_param}" \
             --with-decryption \
@@ -352,7 +348,7 @@ retrieve_from_ssm() {
     log_error ""
     log_error "Troubleshooting steps:"
     log_error "  1. Check master node logs: sudo tail -n 200 /var/log/cloud-init-output.log"
-    log_error "  2. Verify SSM parameters exist: aws ssm get-parameter --name ${token_param} --region ${aws_region}"
+    log_error "  2. Verify SSM parameters exist: $AWS_BIN ssm get-parameter --name ${token_param} --region ${aws_region}"
     log_error "  3. Check IAM instance profile permissions"
     exit 1
 }
