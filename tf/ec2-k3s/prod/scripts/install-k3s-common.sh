@@ -45,13 +45,54 @@ install_k3s_prerequisites() {
     fi
     
     # Install AWS CLI v2 if not already installed
+    # Set default installation directory (used in error diagnostics)
+    local AWS_CLI_INSTALL_DIR="/usr/local/aws-cli"
+    
     if ! command -v aws &> /dev/null; then
         log_info "Installing AWS CLI v2..."
-        AWS_CLI_TMP="/tmp/awscli.tar.gz"
-        AWS_CLI_INSTALL_DIR="/usr/local/aws-cli"
+        
+        # Pre-installation diagnostic logging
+        log_info "Pre-installation diagnostics:"
+        log_info "  Current PATH: ${PATH}"
+        log_info "  Current user: $(whoami)"
+        log_info "  Current working directory: $(pwd)"
+        
+        # Check /usr/local/bin directory
+        if [[ -d "/usr/local/bin" ]]; then
+            log_info "  /usr/local/bin exists"
+            log_info "  /usr/local/bin permissions: $(stat -c '%a %U:%G' /usr/local/bin 2>/dev/null || stat -f '%A %Su:%Sg' /usr/local/bin 2>/dev/null || echo 'unknown')"
+            if [[ -w "/usr/local/bin" ]]; then
+                log_info "  /usr/local/bin is writable"
+            else
+                log_warn "  /usr/local/bin is NOT writable"
+            fi
+        else
+            log_warn "  /usr/local/bin does not exist, will be created"
+        fi
+        
+        # Check disk space
+        local available_space
+        available_space=$(df -h /usr/local 2>/dev/null | tail -1 | awk '{print $4}' || echo "unknown")
+        log_info "  Available disk space in /usr/local: ${available_space}"
+        
+        # Check for existing AWS CLI installations
+        local existing_aws
+        existing_aws=$(find /usr/local /usr/bin /usr/sbin -name aws -type f 2>/dev/null | head -5 || true)
+        if [[ -n "$existing_aws" ]]; then
+            log_warn "  Found existing AWS CLI installations:"
+            echo "$existing_aws" | while read -r path; do
+                log_warn "    - $path"
+            done
+        else
+            log_info "  No existing AWS CLI installations found"
+        fi
+        
+        local AWS_CLI_TMP="/tmp/awscli.tar.gz"
+        local AWS_CLI_INSTALL_LOG="/tmp/awscli-install.log"
         
         # Detect CPU architecture for AWS CLI download
         ARCH="$(uname -m)"
+        log_info "Detected CPU architecture: $ARCH"
         case "$ARCH" in
           x86_64)
             AWSCLI_URL="https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip"
@@ -64,30 +105,148 @@ install_k3s_prerequisites() {
             exit 1
             ;;
         esac
+        log_info "AWS CLI download URL: $AWSCLI_URL"
         
         # Download AWS CLI v2
+        log_info "Downloading AWS CLI v2 from $AWSCLI_URL..."
         if ! curl -fsSL "$AWSCLI_URL" -o /tmp/awscliv2.zip; then
-            log_error "Failed to download AWS CLI v2"
+            log_error "Failed to download AWS CLI v2 from $AWSCLI_URL"
+            exit 1
+        fi
+        
+        # Verify download
+        if [[ ! -f /tmp/awscliv2.zip ]]; then
+            log_error "Downloaded file /tmp/awscliv2.zip does not exist"
+            exit 1
+        fi
+        
+        local zip_size
+        zip_size=$(stat -c%s /tmp/awscliv2.zip 2>/dev/null || stat -f%z /tmp/awscliv2.zip 2>/dev/null || echo "unknown")
+        log_info "Downloaded file size: ${zip_size} bytes ($(numfmt --to=iec-i --suffix=B ${zip_size} 2>/dev/null || echo 'unknown'))"
+        
+        if [[ "$zip_size" -lt 1000 ]]; then
+            log_error "Downloaded file is suspiciously small (${zip_size} bytes), download may have failed"
+            log_error "File contents:"
+            head -20 /tmp/awscliv2.zip 2>/dev/null || true
             exit 1
         fi
         
         # Install unzip if not available
         if ! command -v unzip &> /dev/null; then
-            apt-get install -y -qq unzip > /dev/null
+            log_info "Installing unzip package..."
+            if ! apt-get install -y -qq unzip > /dev/null; then
+                log_error "Failed to install unzip"
+                exit 1
+            fi
+            log_info "unzip installed successfully"
+        else
+            log_info "unzip already available: $(command -v unzip)"
         fi
         
-        # Extract and install
-        if ! unzip -q /tmp/awscliv2.zip -d /tmp && /tmp/aws/install -i "$AWS_CLI_INSTALL_DIR" -b /usr/local/bin > /dev/null 2>&1; then
-            log_error "Failed to install AWS CLI v2"
+        # Extract AWS CLI
+        log_info "Extracting AWS CLI installer..."
+        if ! unzip -q /tmp/awscliv2.zip -d /tmp; then
+            log_error "Failed to extract AWS CLI installer from /tmp/awscliv2.zip"
             exit 1
         fi
         
+        # Verify extraction
+        if [[ ! -f /tmp/aws/install ]]; then
+            log_error "Extraction failed: /tmp/aws/install not found"
+            log_error "Contents of /tmp/aws:"
+            ls -la /tmp/aws 2>/dev/null || true
+            exit 1
+        fi
+        
+        log_info "Extraction successful, installer found at /tmp/aws/install"
+        log_info "Installer permissions: $(stat -c '%a %U:%G' /tmp/aws/install 2>/dev/null || stat -f '%A %Su:%Sg' /tmp/aws/install 2>/dev/null || echo 'unknown')"
+        
+        # Run AWS CLI installer with logging
+        log_info "Running AWS CLI installer..."
+        log_info "  Installation directory: $AWS_CLI_INSTALL_DIR"
+        log_info "  Binary directory: /usr/local/bin"
+        log_info "  Installer log: $AWS_CLI_INSTALL_LOG"
+        
+        # Clear any existing log file
+        > "$AWS_CLI_INSTALL_LOG"
+        
+        # Run installer and capture output
+        local install_exit_code=0
+        if ! /tmp/aws/install -i "$AWS_CLI_INSTALL_DIR" -b /usr/local/bin > "$AWS_CLI_INSTALL_LOG" 2>&1; then
+            install_exit_code=$?
+        fi
+        
+        # Log installer output
+        if [[ -s "$AWS_CLI_INSTALL_LOG" ]]; then
+            log_info "Installer output:"
+            while IFS= read -r line; do
+                log_info "  $line"
+            done < "$AWS_CLI_INSTALL_LOG"
+        else
+            log_warn "Installer produced no output"
+        fi
+        
+        # Check installer exit code
+        if [[ $install_exit_code -ne 0 ]]; then
+            log_error "AWS CLI installer failed with exit code: $install_exit_code"
+            log_error "Full installer log:"
+            cat "$AWS_CLI_INSTALL_LOG" || true
+            exit 1
+        fi
+        
+        log_info "AWS CLI installer completed successfully (exit code: $install_exit_code)"
+        
+        # Post-installation diagnostic logging
+        log_info "Post-installation diagnostics:"
+        
+        # Check what was created in installation directory
+        if [[ -d "$AWS_CLI_INSTALL_DIR" ]]; then
+            log_info "  Installation directory $AWS_CLI_INSTALL_DIR exists"
+            local install_dir_size
+            install_dir_size=$(du -sh "$AWS_CLI_INSTALL_DIR" 2>/dev/null | cut -f1 || echo "unknown")
+            log_info "  Installation directory size: ${install_dir_size}"
+            log_info "  Contents of installation directory:"
+            ls -la "$AWS_CLI_INSTALL_DIR" 2>/dev/null | head -10 | while IFS= read -r line; do
+                log_info "    $line"
+            done || true
+        else
+            log_warn "  Installation directory $AWS_CLI_INSTALL_DIR does not exist"
+        fi
+        
+        # Check what was created in binary directory
+        log_info "  Checking /usr/local/bin for AWS CLI files:"
+        local bin_files
+        bin_files=$(ls -la /usr/local/bin/aws* 2>/dev/null || true)
+        if [[ -n "$bin_files" ]]; then
+            echo "$bin_files" | while IFS= read -r line; do
+                log_info "    $line"
+            done
+        else
+            log_warn "    No aws* files found in /usr/local/bin"
+        fi
+        
+        # Check for symlinks
+        if [[ -L /usr/local/bin/aws ]]; then
+            log_info "  /usr/local/bin/aws is a symlink"
+            log_info "  Symlink target: $(readlink -f /usr/local/bin/aws 2>/dev/null || echo 'unknown')"
+            if [[ ! -e /usr/local/bin/aws ]]; then
+                log_error "  Symlink is broken (target does not exist)"
+            fi
+        elif [[ -f /usr/local/bin/aws ]]; then
+            log_info "  /usr/local/bin/aws is a regular file"
+        fi
+        
         # Cleanup
-        rm -rf /tmp/aws /tmp/awscliv2.zip
+        log_info "Cleaning up temporary files..."
+        rm -rf /tmp/aws /tmp/awscliv2.zip "$AWS_CLI_INSTALL_LOG"
+        log_info "Cleanup completed"
         
         log_info "AWS CLI v2 installed successfully"
     else
-        log_info "AWS CLI already installed"
+        local existing_aws_path
+        existing_aws_path=$(command -v aws)
+        log_info "AWS CLI already installed at: $existing_aws_path"
+        log_info "AWS CLI version: $(aws --version 2>&1 | head -n1 || echo 'unknown')"
     fi
     
     # Verify AWS CLI binary exists and is executable
@@ -95,8 +254,77 @@ install_k3s_prerequisites() {
     
     if [[ ! -x "$AWS_BIN" ]]; then
         log_error "AWS CLI binary not found at expected path: $AWS_BIN"
-        log_error "Searching for aws binary..."
-        find /usr/local -name aws 2>/dev/null | head -n 10 || true
+        log_error "Comprehensive diagnostics:"
+        
+        # Check if file exists but not executable
+        if [[ -f "$AWS_BIN" ]]; then
+            log_error "  File exists but is not executable"
+            log_error "  File permissions: $(stat -c '%a %U:%G' "$AWS_BIN" 2>/dev/null || stat -f '%A %Su:%Sg' "$AWS_BIN" 2>/dev/null || echo 'unknown')"
+            log_error "  File type: $(file "$AWS_BIN" 2>/dev/null || echo 'unknown')"
+        elif [[ -L "$AWS_BIN" ]]; then
+            log_error "  Symlink exists at $AWS_BIN"
+            log_error "  Symlink target: $(readlink "$AWS_BIN" 2>/dev/null || echo 'unknown')"
+            if [[ ! -e "$AWS_BIN" ]]; then
+                log_error "  Symlink is broken (target does not exist)"
+            fi
+        else
+            log_error "  File does not exist at $AWS_BIN"
+        fi
+        
+        # Check installation directory
+        if [[ -d "$AWS_CLI_INSTALL_DIR" ]]; then
+            log_error "  Installation directory $AWS_CLI_INSTALL_DIR exists:"
+            log_error "    Contents:"
+            ls -la "$AWS_CLI_INSTALL_DIR" 2>/dev/null | head -20 | while IFS= read -r line; do
+                log_error "      $line"
+            done || true
+            
+            # Look for aws binary in installation directory
+            local aws_in_install_dir
+            aws_in_install_dir=$(find "$AWS_CLI_INSTALL_DIR" -name aws -type f 2>/dev/null | head -5 || true)
+            if [[ -n "$aws_in_install_dir" ]]; then
+                log_error "    Found aws binary in installation directory:"
+                echo "$aws_in_install_dir" | while read -r path; do
+                    log_error "      - $path (executable: $([ -x "$path" ] && echo 'yes' || echo 'no'))"
+                done
+            fi
+        else
+            log_error "  Installation directory $AWS_CLI_INSTALL_DIR does not exist"
+        fi
+        
+        # Check /usr/local/bin directory
+        log_error "  /usr/local/bin directory status:"
+        if [[ -d /usr/local/bin ]]; then
+            log_error "    Directory exists"
+            log_error "    Permissions: $(stat -c '%a %U:%G' /usr/local/bin 2>/dev/null || stat -f '%A %Su:%Sg' /usr/local/bin 2>/dev/null || echo 'unknown')"
+            log_error "    Writable: $([ -w /usr/local/bin ] && echo 'yes' || echo 'no')"
+            log_error "    Contents (first 20 items):"
+            ls -la /usr/local/bin 2>/dev/null | head -20 | while IFS= read -r line; do
+                log_error "      $line"
+            done || true
+        else
+            log_error "    Directory does not exist"
+        fi
+        
+        # Search for aws binary
+        log_error "  Searching for aws binary in common locations:"
+        local found_aws
+        found_aws=$(find /usr/local /usr/bin /usr/sbin -name aws -type f 2>/dev/null | head -10 || true)
+        if [[ -n "$found_aws" ]]; then
+            log_error "    Found aws binaries:"
+            echo "$found_aws" | while read -r path; do
+                local is_executable
+                is_executable=$([ -x "$path" ] && echo 'yes' || echo 'no')
+                log_error "      - $path (executable: $is_executable)"
+            done
+        else
+            log_error "    No aws binary found in common locations"
+        fi
+        
+        # Check PATH
+        log_error "  Current PATH: ${PATH}"
+        log_error "  /usr/local/bin in PATH: $([[ ":$PATH:" == *":/usr/local/bin:"* ]] && echo 'yes' || echo 'no')"
+        
         exit 1
     fi
     
