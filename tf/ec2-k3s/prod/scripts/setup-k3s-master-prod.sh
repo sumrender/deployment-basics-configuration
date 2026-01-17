@@ -503,6 +503,7 @@ main() {
     # Note: --disable traefik is already included in install_k3s_binary function
     install_k3s_binary "server" "--bind-address 0.0.0.0 --advertise-address ${master_ip} --tls-san ${master_ip}"
     wait_for_k3s_ready
+    verify_traefik_disabled
 
     # Write token and IP to SSM Parameter Store
     write_to_ssm

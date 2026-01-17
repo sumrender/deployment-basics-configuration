@@ -361,9 +361,11 @@ install_k3s_binary() {
     local additional_flags="${2:-}"
     
     if command -v k3s &> /dev/null; then
-        log_warn "k3s appears to be already installed. Skipping installation."
-        log_info "To reinstall, uninstall k3s first: /usr/local/bin/k3s-uninstall.sh"
-        return
+        log_warn "k3s already installed — forcing uninstall to ensure deterministic configuration"
+        if [[ -f /usr/local/bin/k3s-uninstall.sh ]]; then
+            /usr/local/bin/k3s-uninstall.sh || true
+        fi
+        rm -rf /etc/rancher /var/lib/rancher
     fi
     
     log_info "Installing k3s as ${k3s_mode}..."
@@ -376,15 +378,19 @@ install_k3s_binary() {
         fi
         
         log_info "Installing k3s with flags: ${k3s_exec_flags}"
-        log_info "Executing: curl -sfL ${K3S_INSTALL_SCRIPT} | INSTALL_K3S_EXEC='${k3s_exec_flags}' sh -"
         
-        # Export INSTALL_K3S_EXEC and run the install script
-        if INSTALL_K3S_EXEC="${k3s_exec_flags}" curl -sfL "${K3S_INSTALL_SCRIPT}" | sh -; then
+        # Export INSTALL_K3S_EXEC before the pipeline so it reaches the installer shell
+        export INSTALL_K3S_EXEC="${k3s_exec_flags}"
+        log_info "Exported INSTALL_K3S_EXEC=${INSTALL_K3S_EXEC}"
+        
+        if curl -sfL "${K3S_INSTALL_SCRIPT}" | sh -; then
             log_info "k3s installation command completed successfully"
         else
             log_error "k3s installation command failed"
             exit 1
         fi
+        
+        unset INSTALL_K3S_EXEC
     else
         # For agent mode, K3S_URL and K3S_TOKEN should be set as env vars
         # The k3s install script will automatically detect agent mode from K3S_URL
@@ -418,6 +424,24 @@ wait_for_k3s_ready() {
     done
     
     log_info "k3s is ready"
+}
+
+# Verify that Traefik is disabled
+verify_traefik_disabled() {
+    log_info "Verifying that Traefik is disabled..."
+
+    # Check for Traefik helmchart in kube-system namespace
+    # If helmcharts CRD doesn't exist or command fails, we assume Traefik is not present
+    local helmcharts_output
+    helmcharts_output=$(k3s kubectl get helmcharts -n kube-system 2>/dev/null || true)
+    
+    if echo "$helmcharts_output" | grep -qi traefik; then
+        log_error "Traefik helmchart detected — disable flag failed"
+        k3s kubectl get helmcharts -n kube-system || true
+        exit 1
+    fi
+
+    log_info "✓ Traefik is not present"
 }
 
 # Configure kubeconfig for a non-root user
