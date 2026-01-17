@@ -5,11 +5,14 @@ set -euo pipefail
 # k3s Worker Node Setup Script for Production
 # 
 # This script sets up a k3s worker node that joins an existing k3s cluster
-# using the server token and master IP provided as environment variables.
+# by retrieving the server token and master IP from AWS SSM Parameter Store.
 #
-# Environment Variables:
-#   - K3S_TOKEN: k3s server token (required)
-#   - K3S_MASTER_IP: Master node IP address (required)
+# SSM Parameters:
+#   - /k3s/prod/token: k3s server token (SecureString)
+#   - /k3s/prod/master-ip: Master node IP address (String)
+#
+# The script will retry retrieving these parameters with exponential backoff
+# to handle cases where the master node is still setting up.
 ################################################################################
 
 # Colors for output
@@ -34,7 +37,7 @@ if [[ ! -f "$COMMON_SCRIPT" ]]; then
     REPO_PATH="${REPO_PATH#git@github.com:}"
     REPO_PATH="${REPO_PATH%.git}"
     
-    RAW_COMMON_URL="https://raw.githubusercontent.com/${REPO_PATH}/${REPO_BRANCH}/tf/ec2-k3s/install-k3s-common.sh"
+    RAW_COMMON_URL="https://raw.githubusercontent.com/${REPO_PATH}/${REPO_BRANCH}/tf/ec2-k3s/prod/scripts/install-k3s-common.sh"
     curl -fsSL -o "$COMMON_SCRIPT" "$RAW_COMMON_URL"
     chmod +x "$COMMON_SCRIPT"
 fi
@@ -44,17 +47,20 @@ source "$COMMON_SCRIPT"
 # Helper functions
 log_info() {
     local message="$1"
-    echo -e "${GREEN}[INFO]${NC} $message"
+    local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+    echo -e "${GREEN}[INFO]${NC} [${timestamp}] $message"
 }
 
 log_warn() {
     local message="$1"
-    echo -e "${YELLOW}[WARN]${NC} $message"
+    local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+    echo -e "${YELLOW}[WARN]${NC} [${timestamp}] $message"
 }
 
 log_error() {
     local message="$1"
-    echo -e "${RED}[ERROR]${NC} $message"
+    local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+    echo -e "${RED}[ERROR]${NC} [${timestamp}] $message"
 }
 
 # Check if running as root
@@ -209,6 +215,133 @@ install_k3s_agent_with_retry() {
     exit 1
 }
 
+# Retrieve k3s token and master IP from SSM Parameter Store
+retrieve_from_ssm() {
+    log_info "Retrieving k3s token and master IP from SSM Parameter Store..."
+    
+    # Get AWS region from instance metadata
+    local aws_region
+    if ! aws_region=$(curl -s --connect-timeout 2 http://169.254.169.254/latest/meta-data/placement/region 2>/dev/null); then
+        log_error "Failed to retrieve AWS region from instance metadata"
+        exit 1
+    fi
+    
+    log_info "AWS region: ${aws_region}"
+    
+    # Verify AWS CLI is available
+    if ! command -v aws &> /dev/null; then
+        log_error "AWS CLI is not installed or not in PATH"
+        exit 1
+    fi
+    
+    # Verify IAM role credentials are available
+    if ! aws sts get-caller-identity --region "${aws_region}" > /dev/null 2>&1; then
+        log_error "AWS credentials not available. Check IAM instance profile."
+        exit 1
+    fi
+    
+    local caller_identity
+    caller_identity=$(aws sts get-caller-identity --region "${aws_region}" --output json 2>/dev/null)
+    log_info "AWS credentials verified: $(echo "$caller_identity" | grep -o '"Arn": "[^"]*' | cut -d'"' -f4)"
+    
+    # SSM parameter names
+    local token_param="/k3s/prod/token"
+    local master_ip_param="/k3s/prod/master-ip"
+    
+    # Retrieve parameters with retry logic
+    local max_retries=30
+    local retry_count=0
+    local retry_delay=10
+    local k3s_token=""
+    local master_ip=""
+    
+    log_info "Attempting to retrieve SSM parameters (max retries: ${max_retries})..."
+    
+    while [[ $retry_count -lt $max_retries ]]; do
+        retry_count=$((retry_count + 1))
+        
+        if [[ $retry_count -gt 1 ]]; then
+            log_info "Retry attempt ${retry_count}/${max_retries} (waiting ${retry_delay}s before retry)..."
+            sleep $retry_delay
+            retry_delay=$((retry_delay + 5))  # Exponential backoff with increment
+        fi
+        
+        # Retrieve master IP
+        log_info "Retrieving master IP from SSM: ${master_ip_param} (attempt ${retry_count})"
+        master_ip=$(aws ssm get-parameter \
+            --region "${aws_region}" \
+            --name "${master_ip_param}" \
+            --query 'Parameter.Value' \
+            --output text 2>/dev/null || echo "")
+        
+        # Retrieve token
+        log_info "Retrieving k3s token from SSM: ${token_param} (attempt ${retry_count})"
+        k3s_token=$(aws ssm get-parameter \
+            --region "${aws_region}" \
+            --name "${token_param}" \
+            --with-decryption \
+            --query 'Parameter.Value' \
+            --output text 2>/dev/null || echo "")
+        
+        # Validate retrieved values
+        if [[ -n "$master_ip" ]] && [[ "$master_ip" != "placeholder-will-be-updated-by-master-node" ]] && \
+           [[ -n "$k3s_token" ]] && [[ "$k3s_token" != "placeholder-will-be-updated-by-master-node" ]]; then
+            # Validate IP format (basic check)
+            if ! echo "$master_ip" | grep -qE '^([0-9]{1,3}\.){3}[0-9]{1,3}$'; then
+                log_warn "Master IP format may be invalid: ${master_ip}, but continuing..."
+            fi
+            
+            # Validate token is not empty
+            local token_trimmed=$(echo "$k3s_token" | tr -d '[:space:]')
+            if [[ -z "$token_trimmed" ]]; then
+                log_warn "Token appears to be empty, will retry..."
+                continue
+            fi
+            
+            log_info "✓ Successfully retrieved SSM parameters:"
+            log_info "  - ${master_ip_param}: ${master_ip}"
+            log_info "  - ${token_param}: retrieved (length: ${#k3s_token} characters, masked)"
+            log_info "  Token preview: ${k3s_token:0:20}...${k3s_token: -10} (masked)"
+            
+            # Export as environment variables for use in this script
+            export K3S_TOKEN="$k3s_token"
+            export K3S_MASTER_IP="$master_ip"
+            
+            return 0
+        else
+            log_warn "SSM parameters not ready yet or contain placeholder values"
+            if [[ -z "$master_ip" ]]; then
+                log_warn "  - Master IP: not retrieved"
+            elif [[ "$master_ip" == "placeholder-will-be-updated-by-master-node" ]]; then
+                log_warn "  - Master IP: still contains placeholder value"
+            else
+                log_info "  - Master IP: ${master_ip}"
+            fi
+            
+            if [[ -z "$k3s_token" ]]; then
+                log_warn "  - Token: not retrieved"
+            elif [[ "$k3s_token" == "placeholder-will-be-updated-by-master-node" ]]; then
+                log_warn "  - Token: still contains placeholder value"
+            else
+                log_info "  - Token: retrieved (length: ${#k3s_token})"
+            fi
+        fi
+    done
+    
+    log_error "Failed to retrieve SSM parameters after ${max_retries} attempts"
+    log_error "This usually means:"
+    log_error "  1. Master node has not completed setup yet"
+    log_error "  2. Master node failed to write parameters to SSM"
+    log_error "  3. IAM permissions are insufficient"
+    log_error "  4. SSM parameter names are incorrect"
+    log_error ""
+    log_error "Troubleshooting steps:"
+    log_error "  1. Check master node logs: sudo tail -n 200 /var/log/cloud-init-output.log"
+    log_error "  2. Verify SSM parameters exist: aws ssm get-parameter --name ${token_param} --region ${aws_region}"
+    log_error "  3. Check IAM instance profile permissions"
+    exit 1
+}
+
 # Main execution
 main() {
     log_info "Starting k3s worker node setup for production..."
@@ -220,39 +353,14 @@ main() {
     install_k3s_prerequisites
     set_es_kernel_param
     
-    # Get token from environment variable
-    if [[ -z "${K3S_TOKEN:-}" ]]; then
-        log_error "K3S_TOKEN environment variable is required"
-        exit 1
-    fi
+    # Retrieve token and master IP from SSM
+    retrieve_from_ssm
+    
     local k3s_token="$K3S_TOKEN"
-    
-    # Validate token is not empty (already checked above, but double-check after trimming)
-    if [[ -z "$(echo "$k3s_token" | tr -d '[:space:]')" ]]; then
-        log_error "K3S_TOKEN is empty or contains only whitespace"
-        log_error "This indicates the token file was not properly created."
-        log_error "The master node may not be ready yet, or there was an issue retrieving the token."
-        log_error "Please ensure the master node is fully provisioned and the token file exists."
-        exit 1
-    fi
-    
-    log_info "k3s server token provided via environment variable"
-    
-    # Get master IP from environment variable
-    if [[ -z "${K3S_MASTER_IP:-}" ]]; then
-        log_error "K3S_MASTER_IP environment variable is required"
-        exit 1
-    fi
     local master_ip="$K3S_MASTER_IP"
     
-    # Validate master IP is not empty
-    if [[ -z "$master_ip" || "$master_ip" == "" ]]; then
-        log_error "K3S_MASTER_IP environment variable is empty or not set"
-        log_error "This indicates the master IP file was not properly created."
-        exit 1
-    fi
-    
-    log_info "Master node IP provided via environment variable: ${master_ip}"
+    log_info "k3s server token retrieved from SSM (length: ${#k3s_token} characters)"
+    log_info "Master node IP retrieved from SSM: ${master_ip}"
     
     # Verify master is ready before attempting installation
     log_info "Verifying master node readiness before agent installation..."

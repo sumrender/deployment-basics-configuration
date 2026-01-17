@@ -36,7 +36,7 @@ if [[ ! -f "$COMMON_SCRIPT" ]]; then
     REPO_PATH="${REPO_PATH#git@github.com:}"
     REPO_PATH="${REPO_PATH%.git}"
     
-    RAW_COMMON_URL="https://raw.githubusercontent.com/${REPO_PATH}/${REPO_BRANCH}/tf/ec2-k3s/install-k3s-common.sh"
+    RAW_COMMON_URL="https://raw.githubusercontent.com/${REPO_PATH}/${REPO_BRANCH}/tf/ec2-k3s/prod/scripts/install-k3s-common.sh"
     curl -fsSL -o "$COMMON_SCRIPT" "$RAW_COMMON_URL"
     chmod +x "$COMMON_SCRIPT"
 fi
@@ -46,17 +46,20 @@ source "$COMMON_SCRIPT"
 # Helper functions
 log_info() {
     local message="$1"
-    echo -e "${GREEN}[INFO]${NC} $message"
+    local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+    echo -e "${GREEN}[INFO]${NC} [${timestamp}] $message"
 }
 
 log_warn() {
     local message="$1"
-    echo -e "${YELLOW}[WARN]${NC} $message"
+    local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+    echo -e "${YELLOW}[WARN]${NC} [${timestamp}] $message"
 }
 
 log_error() {
     local message="$1"
-    echo -e "${RED}[ERROR]${NC} $message"
+    local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+    echo -e "${RED}[ERROR]${NC} [${timestamp}] $message"
 }
 
 # Check if running as root
@@ -275,6 +278,134 @@ apply_argocd_application() {
     log_info "ArgoCD Application applied"
 }
 
+# Write k3s token and master IP to SSM Parameter Store
+write_to_ssm() {
+    log_info "Writing k3s token and master IP to SSM Parameter Store..."
+    
+    # Get AWS region from instance metadata
+    local aws_region
+    if ! aws_region=$(curl -s --connect-timeout 2 http://169.254.169.254/latest/meta-data/placement/region 2>/dev/null); then
+        log_error "Failed to retrieve AWS region from instance metadata"
+        exit 1
+    fi
+    
+    log_info "AWS region: ${aws_region}"
+    
+    # Verify AWS CLI is available
+    if ! command -v aws &> /dev/null; then
+        log_error "AWS CLI is not installed or not in PATH"
+        exit 1
+    fi
+    
+    # Verify IAM role credentials are available
+    if ! aws sts get-caller-identity --region "${aws_region}" > /dev/null 2>&1; then
+        log_error "AWS credentials not available. Check IAM instance profile."
+        exit 1
+    fi
+    
+    local caller_identity
+    caller_identity=$(aws sts get-caller-identity --region "${aws_region}" --output json 2>/dev/null)
+    log_info "AWS credentials verified: $(echo "$caller_identity" | grep -o '"Arn": "[^"]*' | cut -d'"' -f4)"
+    
+    # Get master private IP from instance metadata
+    local master_ip
+    if ! master_ip=$(curl -s --connect-timeout 2 http://169.254.169.254/latest/meta-data/local-ipv4 2>/dev/null); then
+        log_error "Failed to retrieve master private IP from instance metadata"
+        exit 1
+    fi
+    
+    log_info "Master private IP: ${master_ip}"
+    
+    # Read k3s token from master node
+    local k3s_token
+    local token_file="/var/lib/rancher/k3s/server/node-token"
+    
+    if [ ! -f "$token_file" ]; then
+        log_error "k3s token file not found: ${token_file}"
+        exit 1
+    fi
+    
+    if ! k3s_token=$(sudo cat "$token_file" 2>/dev/null); then
+        log_error "Failed to read k3s token from ${token_file}"
+        exit 1
+    fi
+    
+    # Trim whitespace from token
+    k3s_token=$(echo "$k3s_token" | tr -d '\r\n' | xargs)
+    
+    if [ -z "$k3s_token" ]; then
+        log_error "k3s token is empty after reading"
+        exit 1
+    fi
+    
+    local token_length=${#k3s_token}
+    log_info "k3s token retrieved (length: ${token_length} characters)"
+    log_info "Token preview: ${k3s_token:0:20}...${k3s_token: -10} (masked)"
+    
+    # SSM parameter names
+    local token_param="/k3s/prod/token"
+    local master_ip_param="/k3s/prod/master-ip"
+    
+    # Write master IP to SSM
+    log_info "Writing master IP to SSM parameter: ${master_ip_param}"
+    if ! aws ssm put-parameter \
+        --region "${aws_region}" \
+        --name "${master_ip_param}" \
+        --value "${master_ip}" \
+        --type "String" \
+        --overwrite \
+        --description "k3s master node private IP address" \
+        > /dev/null 2>&1; then
+        log_error "Failed to write master IP to SSM parameter: ${master_ip_param}"
+        exit 1
+    fi
+    
+    log_info "✓ Master IP successfully written to SSM: ${master_ip_param}=${master_ip}"
+    
+    # Write token to SSM (SecureString)
+    log_info "Writing k3s token to SSM parameter: ${token_param}"
+    if ! aws ssm put-parameter \
+        --region "${aws_region}" \
+        --name "${token_param}" \
+        --value "${k3s_token}" \
+        --type "SecureString" \
+        --overwrite \
+        --description "k3s master node token for worker node registration" \
+        > /dev/null 2>&1; then
+        log_error "Failed to write k3s token to SSM parameter: ${token_param}"
+        exit 1
+    fi
+    
+    log_info "✓ k3s token successfully written to SSM: ${token_param} (SecureString, encrypted)"
+    
+    # Verify parameters were written correctly
+    log_info "Verifying SSM parameters..."
+    local verify_ip
+    verify_ip=$(aws ssm get-parameter \
+        --region "${aws_region}" \
+        --name "${master_ip_param}" \
+        --query 'Parameter.Value' \
+        --output text 2>/dev/null || echo "")
+    
+    local verify_token_length
+    verify_token_length=$(aws ssm get-parameter \
+        --region "${aws_region}" \
+        --name "${token_param}" \
+        --with-decryption \
+        --query 'Parameter.Value' \
+        --output text 2>/dev/null | wc -c || echo "0")
+    
+    if [ "$verify_ip" = "$master_ip" ] && [ "$verify_token_length" -gt 0 ]; then
+        log_info "✓ SSM parameter verification successful"
+        log_info "  - ${master_ip_param}: ${verify_ip}"
+        log_info "  - ${token_param}: retrieved (length: $((verify_token_length - 1)) characters)"
+    else
+        log_warn "SSM parameter verification failed or incomplete"
+        log_warn "  - Expected IP: ${master_ip}, Got: ${verify_ip}"
+        log_warn "  - Token length: ${verify_token_length}"
+    fi
+}
+
 # Wait for ArgoCD sync
 wait_for_argocd_sync() {
     log_info "Waiting for ArgoCD Application 'platform-${K8S_ENV}' to sync..."
@@ -371,6 +502,9 @@ main() {
     
     # Wait for sync
     wait_for_argocd_sync
+    
+    # Write token and IP to SSM Parameter Store
+    write_to_ssm
     
     log_info "Master node setup complete!"
     echo ""

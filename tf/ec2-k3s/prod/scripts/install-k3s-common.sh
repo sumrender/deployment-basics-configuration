@@ -30,14 +30,52 @@ log_error() {
     echo -e "${RED}[ERROR]${NC} $message"
 }
 
-# Install prerequisites (curl, git, kernel parameters)
+# Install prerequisites (curl, git, awscli, kernel parameters)
 install_k3s_prerequisites() {
-    log_info "Installing prerequisites (curl, git)..."
+    log_info "Installing prerequisites (curl, git, awscli)..."
     export DEBIAN_FRONTEND=noninteractive
-    if ! apt-get update -qq && apt-get install -y -qq curl git > /dev/null; then
-        log_error "Failed to install prerequisites"
+    if ! apt-get update -qq; then
+        log_error "Failed to update package list"
         exit 1
     fi
+    
+    if ! apt-get install -y -qq curl git > /dev/null; then
+        log_error "Failed to install curl and git"
+        exit 1
+    fi
+    
+    # Install AWS CLI v2 if not already installed
+    if ! command -v aws &> /dev/null; then
+        log_info "Installing AWS CLI v2..."
+        AWS_CLI_TMP="/tmp/awscli.tar.gz"
+        AWS_CLI_INSTALL_DIR="/usr/local/aws-cli"
+        
+        # Download AWS CLI v2
+        if ! curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscliv2.zip; then
+            log_error "Failed to download AWS CLI v2"
+            exit 1
+        fi
+        
+        # Install unzip if not available
+        if ! command -v unzip &> /dev/null; then
+            apt-get install -y -qq unzip > /dev/null
+        fi
+        
+        # Extract and install
+        if ! unzip -q /tmp/awscliv2.zip -d /tmp && /tmp/aws/install -i "$AWS_CLI_INSTALL_DIR" -b /usr/local/bin > /dev/null 2>&1; then
+            log_error "Failed to install AWS CLI v2"
+            exit 1
+        fi
+        
+        # Cleanup
+        rm -rf /tmp/aws /tmp/awscliv2.zip
+        
+        log_info "AWS CLI v2 installed successfully"
+    else
+        AWS_CLI_VERSION=$(aws --version 2>&1 | head -n1)
+        log_info "AWS CLI already installed: $AWS_CLI_VERSION"
+    fi
+    
     log_info "Prerequisites installed"
 }
 

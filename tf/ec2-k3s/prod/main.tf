@@ -12,6 +12,148 @@ module "common" {
 # Get current AWS account ID
 data "aws_caller_identity" "current" {}
 
+# IAM role for master node (write to SSM)
+resource "aws_iam_role" "k3s_master" {
+  name = "k3s-master-role-prod"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Action = "sts:AssumeRole"
+        Effect = "Allow"
+        Principal = {
+          Service = "ec2.amazonaws.com"
+        }
+      }
+    ]
+  })
+
+  tags = {
+    Name        = "k3s-master-role-prod"
+    Environment = "prod"
+  }
+}
+
+# IAM policy for master node to write to SSM
+resource "aws_iam_role_policy" "k3s_master_ssm" {
+  name = "k3s-master-ssm-policy-prod"
+  role = aws_iam_role.k3s_master.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "ssm:PutParameter",
+          "ssm:GetParameter",
+          "ssm:TagParameter"
+        ]
+        Resource = [
+          "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter/k3s/prod/token",
+          "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter/k3s/prod/master-ip"
+        ]
+      }
+    ]
+  })
+}
+
+# IAM instance profile for master node
+resource "aws_iam_instance_profile" "k3s_master" {
+  name = "k3s-master-instance-profile-prod"
+  role = aws_iam_role.k3s_master.name
+
+  tags = {
+    Name        = "k3s-master-instance-profile-prod"
+    Environment = "prod"
+  }
+}
+
+# IAM role for worker nodes (read from SSM)
+resource "aws_iam_role" "k3s_worker" {
+  name = "k3s-worker-role-prod"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Action = "sts:AssumeRole"
+        Effect = "Allow"
+        Principal = {
+          Service = "ec2.amazonaws.com"
+        }
+      }
+    ]
+  })
+
+  tags = {
+    Name        = "k3s-worker-role-prod"
+    Environment = "prod"
+  }
+}
+
+# IAM policy for worker nodes to read from SSM
+resource "aws_iam_role_policy" "k3s_worker_ssm" {
+  name = "k3s-worker-ssm-policy-prod"
+  role = aws_iam_role.k3s_worker.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "ssm:GetParameter",
+          "ssm:GetParameters"
+        ]
+        Resource = [
+          "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter/k3s/prod/token",
+          "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter/k3s/prod/master-ip"
+        ]
+      }
+    ]
+  })
+}
+
+# IAM instance profile for worker nodes
+resource "aws_iam_instance_profile" "k3s_worker" {
+  name = "k3s-worker-instance-profile-prod"
+  role = aws_iam_role.k3s_worker.name
+
+  tags = {
+    Name        = "k3s-worker-instance-profile-prod"
+    Environment = "prod"
+  }
+}
+
+# SSM parameter for k3s token (SecureString)
+resource "aws_ssm_parameter" "k3s_token" {
+  name        = "/k3s/prod/token"
+  description = "k3s master node token for worker node registration"
+  type        = "SecureString"
+  value       = "placeholder-will-be-updated-by-master-node"
+
+  tags = {
+    Name        = "k3s-token-prod"
+    Environment = "prod"
+    ManagedBy   = "terraform"
+  }
+}
+
+# SSM parameter for master IP
+resource "aws_ssm_parameter" "k3s_master_ip" {
+  name        = "/k3s/prod/master-ip"
+  description = "k3s master node private IP address"
+  type        = "String"
+  value       = "placeholder-will-be-updated-by-master-node"
+
+  tags = {
+    Name        = "k3s-master-ip-prod"
+    Environment = "prod"
+    ManagedBy   = "terraform"
+  }
+}
 
 # Security group for master node
 resource "aws_security_group" "master_sg" {
@@ -186,7 +328,7 @@ REPO_PATH="$${REPO_PATH#http://github.com/}"
 REPO_PATH="$${REPO_PATH#git@github.com:}"
 REPO_PATH="$${REPO_PATH%.git}"
 
-RAW_MASTER_URL="https://raw.githubusercontent.com/$${REPO_PATH}/${var.github_repo_branch}/tf/ec2-k3s/setup-k3s-master-prod.sh"
+RAW_MASTER_URL="https://raw.githubusercontent.com/$${REPO_PATH}/${var.github_repo_branch}/tf/ec2-k3s/prod/scripts/setup-k3s-master-prod.sh"
 curl -fsSL -o "$MASTER_SCRIPT" "$RAW_MASTER_URL"
 chmod +x "$MASTER_SCRIPT"
 
@@ -217,16 +359,13 @@ REPO_PATH="$${REPO_PATH#http://github.com/}"
 REPO_PATH="$${REPO_PATH#git@github.com:}"
 REPO_PATH="$${REPO_PATH%.git}"
 
-RAW_WORKER_URL="https://raw.githubusercontent.com/$${REPO_PATH}/${var.github_repo_branch}/tf/ec2-k3s/setup-k3s-worker-prod.sh"
+RAW_WORKER_URL="https://raw.githubusercontent.com/$${REPO_PATH}/${var.github_repo_branch}/tf/ec2-k3s/prod/scripts/setup-k3s-worker-prod.sh"
 curl -fsSL -o "$WORKER_SCRIPT" "$RAW_WORKER_URL"
 chmod +x "$WORKER_SCRIPT"
 
-# Run the worker setup script with environment variables
-# Note: master-ip file is created by local_file resource (exists at plan time)
-#       k3s-token file is created by wait_for_master_ready provisioner (exists at apply time)
-#       Using try() to handle token/IP files not existing during initial plan
-K3S_MASTER_IP="${trimspace(try(file("${path.module}/.terraform/master-ip-prod.txt"), ""))}" \
-K3S_TOKEN="${trimspace(try(file("${path.module}/.terraform/k3s-token-prod.txt"), ""))}" \
+# Run the worker setup script (it will retrieve token and IP from SSM)
+REPO_URL="${var.github_repo_url}" \
+REPO_BRANCH="${var.github_repo_branch}" \
 "$WORKER_SCRIPT"
 EOF
 }
@@ -239,6 +378,7 @@ resource "aws_instance" "k3s_master" {
   vpc_security_group_ids      = [aws_security_group.master_sg.id]
   subnet_id                   = module.common.default_subnet_id
   associate_public_ip_address = true
+  iam_instance_profile        = aws_iam_instance_profile.k3s_master.name
 
   root_block_device {
     volume_size = 30
@@ -347,56 +487,48 @@ resource "null_resource" "wait_for_master_ready" {
            ubuntu@"$MASTER_PUBLIC_IP" \
            "sudo systemctl is-active --quiet k3s && sudo k3s kubectl get nodes > /dev/null 2>&1" 2>/dev/null; then
           echo "Master API server is ready and responding!"
-          
-          # Read k3s token from master node
-          echo "Reading k3s token from master node..."
-          K3S_TOKEN=$$(ssh -i "$SSH_KEY_PATH" \
-             -o StrictHostKeyChecking=no \
-             -o UserKnownHostsFile=/dev/null \
-             -o BatchMode=yes \
-             ubuntu@"$MASTER_PUBLIC_IP" \
-             "sudo cat /var/lib/rancher/k3s/server/node-token" 2>/dev/null)
-          
-          if [ -z "$K3S_TOKEN" ]; then
-            echo "ERROR: Failed to read k3s token from master node"
-            exit 1
-          fi
-          
-          # Trim any whitespace from token
-          K3S_TOKEN=$$(echo "$K3S_TOKEN" | tr -d '\r\n' | xargs)
-          
-          if [ -z "$K3S_TOKEN" ]; then
-            echo "ERROR: k3s token is empty after trimming"
-            exit 1
-          fi
-          
-          TOKEN_LENGTH=$${#K3S_TOKEN}
-          echo "Successfully read k3s token from master node (length: $TOKEN_LENGTH characters)"
-          
-          # Create .terraform directory if it doesn't exist
-          mkdir -p "${path.module}/.terraform"
-          
-          # Write token to local file
-          TOKEN_FILE="${path.module}/.terraform/k3s-token-prod.txt"
-          echo "$K3S_TOKEN" > "$TOKEN_FILE"
-          chmod 600 "$TOKEN_FILE"
-          
-          # Verify token was written correctly
-          if [ ! -f "$TOKEN_FILE" ]; then
-            echo "ERROR: Failed to create token file at $TOKEN_FILE"
-            exit 1
-          fi
-          
-          VERIFIED_TOKEN=$$(cat "$TOKEN_FILE" | tr -d '\r\n' | xargs)
-          if [ "$VERIFIED_TOKEN" != "$K3S_TOKEN" ]; then
-            echo "ERROR: Token verification failed - written token does not match read token"
-            exit 1
-          fi
-          
-          echo "✓ k3s token successfully stored to $TOKEN_FILE"
-          echo "  Token file permissions: $$(stat -c '%a' "$TOKEN_FILE" 2>/dev/null || stat -f '%A' "$TOKEN_FILE" 2>/dev/null)"
-          echo "  Token file size: $$(stat -c '%s' "$TOKEN_FILE" 2>/dev/null || stat -f '%z' "$TOKEN_FILE" 2>/dev/null) bytes"
-          
+
+          echo "Verifying SSM parameters are written by master node..."
+          TOKEN_PARAM="/k3s/prod/token"
+          MASTER_IP_PARAM="/k3s/prod/master-ip"
+
+          VERIFY_ATTEMPT=0
+          MAX_VERIFY_ATTEMPTS=60
+
+          while [ $VERIFY_ATTEMPT -lt $MAX_VERIFY_ATTEMPTS ]; do
+            TOKEN_VALUE=$$(aws ssm get-parameter \
+              --region "${var.aws_region}" \
+              --profile "${var.aws_profile}" \
+              --name "$$TOKEN_PARAM" \
+              --with-decryption \
+              --query 'Parameter.Value' \
+              --output text 2>/dev/null || true)
+
+            MASTER_IP_VALUE=$$(aws ssm get-parameter \
+              --region "${var.aws_region}" \
+              --profile "${var.aws_profile}" \
+              --name "$$MASTER_IP_PARAM" \
+              --query 'Parameter.Value' \
+              --output text 2>/dev/null || true)
+
+            if [ -n "$$TOKEN_VALUE" ] && [ "$$TOKEN_VALUE" != "placeholder-will-be-updated-by-master-node" ] && \
+               [ -n "$$MASTER_IP_VALUE" ] && [ "$$MASTER_IP_VALUE" != "placeholder-will-be-updated-by-master-node" ]; then
+              echo "✓ SSM parameters are set:"
+              echo "  - $$MASTER_IP_PARAM=$$MASTER_IP_VALUE"
+              echo "  - $$TOKEN_PARAM=(retrieved, length $${#TOKEN_VALUE})"
+              exit 0
+            fi
+
+            VERIFY_ATTEMPT=$$((VERIFY_ATTEMPT + 1))
+            echo "SSM parameters not ready yet... (attempt $$VERIFY_ATTEMPT/$$MAX_VERIFY_ATTEMPTS)"
+            sleep 10
+          done
+
+          echo "ERROR: SSM parameters were not updated after $$MAX_VERIFY_ATTEMPTS attempts"
+          echo "This usually means the master bootstrap script failed to write to SSM."
+          echo "Check cloud-init logs on the master node:"
+          echo "  sudo tail -n 200 /var/log/cloud-init-output.log"
+          exit 1
           exit 0
         fi
         
@@ -422,63 +554,15 @@ resource "null_resource" "wait_for_master_ready" {
   }
 }
 
-# Write master IP to local file
-resource "local_file" "master_ip" {
-  depends_on = [aws_instance.k3s_master]
-  
-  content  = aws_instance.k3s_master.private_ip
-  filename = "${path.module}/.terraform/master-ip-prod.txt"
-  
-  file_permission = "0644"
-}
-
-# Log master IP storage
-resource "null_resource" "log_master_ip_storage" {
-  depends_on = [local_file.master_ip]
-  
-  provisioner "local-exec" {
-    command = <<-EOT
-      set -e
-      MASTER_IP_FILE="${path.module}/.terraform/master-ip-prod.txt"
-      
-      if [ ! -f "$MASTER_IP_FILE" ]; then
-        echo "ERROR: Master IP file not found at $MASTER_IP_FILE"
-        exit 1
-      fi
-      
-      MASTER_IP=$$(cat "$MASTER_IP_FILE" | tr -d '\r\n' | xargs)
-      
-      if [ -z "$MASTER_IP" ]; then
-        echo "ERROR: Master IP file is empty"
-        exit 1
-      fi
-      
-      # Validate IP format (basic check)
-      if ! echo "$MASTER_IP" | grep -qE '^([0-9]{1,3}\.){3}[0-9]{1,3}$'; then
-        echo "WARNING: Master IP format may be invalid: $MASTER_IP"
-      fi
-      
-      echo "✓ Master IP successfully stored to $MASTER_IP_FILE"
-      echo "  Master private IP: $MASTER_IP"
-      echo "  IP file permissions: $$(stat -c '%a' "$MASTER_IP_FILE" 2>/dev/null || stat -f '%A' "$MASTER_IP_FILE" 2>/dev/null)"
-      echo "  IP file size: $$(stat -c '%s' "$MASTER_IP_FILE" 2>/dev/null || stat -f '%z' "$MASTER_IP_FILE" 2>/dev/null) bytes"
-    EOT
-  }
-  
-  triggers = {
-    master_ip_file = local_file.master_ip.content
-  }
-}
-
-# Note: k3s token file is written by wait_for_master_ready provisioner
-# and will be read directly in worker_user_data using file() function
-
 # Launch template for worker nodes
 resource "aws_launch_template" "k3s_worker" {
   name_prefix   = "k3s-worker-prod-"
   image_id      = module.common.ubuntu_ami_id
   instance_type = var.worker_instance_type
   key_name      = module.common.ec2_key_pair_name
+  iam_instance_profile {
+    name = aws_iam_instance_profile.k3s_worker.name
+  }
 
   vpc_security_group_ids = [aws_security_group.worker_sg.id]
 
@@ -526,9 +610,7 @@ resource "aws_autoscaling_group" "k3s_workers" {
 
   depends_on = [
     aws_instance.k3s_master,
-    null_resource.wait_for_master_ready,
-    local_file.master_ip,
-    null_resource.log_master_ip_storage
+    null_resource.wait_for_master_ready
   ]
 
   tag {
