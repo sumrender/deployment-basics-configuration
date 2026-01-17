@@ -1,6 +1,10 @@
 #!/bin/bash
 set -euo pipefail
 
+# Ensure AWS CLI is in PATH (cloud-init does not always load /usr/local/bin)
+export PATH="/usr/local/bin:/usr/bin:/bin:/usr/local/aws-cli/v2/current/bin:$PATH"
+hash -r
+
 ################################################################################
 # k3s Worker Node Setup Script for Production
 # 
@@ -238,7 +242,10 @@ retrieve_from_ssm() {
     
     # Verify AWS CLI is available
     if ! command -v aws &> /dev/null; then
-        log_error "AWS CLI is not installed or not in PATH"
+        log_error "AWS CLI not found in PATH"
+        log_error "PATH=$PATH"
+        log_error "Looking for aws binary..."
+        find /usr/local -name aws 2>/dev/null | head -n 5 || true
         exit 1
     fi
     
