@@ -70,3 +70,13 @@ The Terraform output will display the exact URL after `terraform apply` complete
 
 Each environment maintains its own local Terraform state file in its respective directory. This ensures complete isolation between dev and staging environments.
 
+## Useful commands
+
+- SSH into a server: `ssh -i "ec2-key.pem" ubuntu@43.204.96.143`
+
+- Logs on servers: `cat /var/log/cloud-init-output.log`
+
+- ArgoCD password (run on master node where argocd is running): 
+```
+kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath="{.data.password}" | base64 -d
+```
