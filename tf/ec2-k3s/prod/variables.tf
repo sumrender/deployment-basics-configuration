@@ -13,7 +13,7 @@ variable "aws_profile" {
 variable "master_instance_type" {
   description = "EC2 instance type for master node"
   type        = string
-  default     = "t3.micro"
+  default     = "t3.medium"
 }
 
 variable "worker_instance_type" {
@@ -25,7 +25,7 @@ variable "worker_instance_type" {
 variable "worker_desired_capacity" {
   description = "Desired number of worker nodes in the ASG"
   type        = number
-  default     = 2
+  default     = 1
 }
 
 variable "allowed_ssh_cidr" {
