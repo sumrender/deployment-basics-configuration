@@ -24,6 +24,17 @@ kubectl apply -f k8s/staging/ingress/
 kubectl port-forward service/caddy-service 4444:80
 ```
 
+### Production Environment
+```bash
+kubectl apply -f k8s/prod/configmap.yaml
+kubectl apply -f k8s/prod/mongo/
+kubectl apply -f k8s/prod/elasticsearch/
+kubectl apply -f k8s/prod/backend/
+kubectl apply -f k8s/prod/frontend/
+kubectl apply -f k8s/prod/ingress/
+kubectl port-forward service/caddy-service 4444:80
+```
+
 Delete everything
 ```bash
 kubectl delete all --all
@@ -65,7 +76,7 @@ docker tag todo-frontend:latest <your-registry>/todo-frontend:latest
 docker push <your-registry>/todo-frontend:latest
 ```
 
-**Important:** Update the image references in `backend/deployment.yaml` and `frontend/deployment.yaml` for each environment (dev/staging) to point to your registry if not using local images.
+**Important:** Update the image references in `backend/deployment.yaml` and `frontend/deployment.yaml` for each environment (dev/staging/prod) to point to your registry if not using local images.
 
 ## Deployment Order
 
@@ -85,6 +96,20 @@ kubectl apply -f k8s/dev/frontend/
 kubectl apply -f k8s/dev/ingress/
 ```
 
+```bash
+# For prod environment
+kubectl apply -f k8s/prod/configmap.yaml
+kubectl apply -f k8s/prod/mongo/
+kubectl apply -f k8s/prod/elasticsearch/
+
+# Wait for databases to be ready
+
+kubectl apply -f k8s/prod/backend/
+kubectl apply -f k8s/prod/frontend/
+
+kubectl apply -f k8s/prod/ingress/
+```
+
 ## Quick Deploy (All at Once)
 
 If you prefer to deploy everything at once:
@@ -95,6 +120,9 @@ kubectl apply -f k8s/dev/
 
 # Staging environment
 kubectl apply -f k8s/staging/
+
+# Production environment
+kubectl apply -f k8s/prod/
 ```
 
 Then wait for all pods to be ready:
@@ -248,6 +276,9 @@ kubectl delete -f k8s/dev/
 
 # Staging environment
 kubectl delete -f k8s/staging/
+
+# Production environment
+kubectl delete -f k8s/prod/
 ```
 
 Or delete individual components:

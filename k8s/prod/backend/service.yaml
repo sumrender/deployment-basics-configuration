@@ -9,6 +9,10 @@ metadata:
     argocd.argoproj.io/sync-wave: "2"
 spec:
   type: LoadBalancer
+  sessionAffinity: ClientIP
+  sessionAffinityConfig:
+    clientIP:
+      timeoutSeconds: 10800  # 3 hours
   ports:
     - port: 3001
       targetPort: 3001
