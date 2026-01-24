@@ -13,13 +13,13 @@ variable "aws_profile" {
 variable "master_instance_type" {
   description = "EC2 instance type for master node"
   type        = string
-  default     = "t3.medium"
+  default     = "t3.micro"
 }
 
 variable "worker_instance_type" {
   description = "EC2 instance type for worker nodes"
   type        = string
-  default     = "t3.large"
+  default     = "t3.medium"
 }
 
 variable "worker_desired_capacity" {
