@@ -518,9 +518,17 @@ resource "aws_autoscaling_group" "k3s_workers" {
   health_check_type   = "EC2"
   health_check_grace_period = 300
 
-  min_size         = var.worker_desired_capacity
-  max_size         = var.worker_desired_capacity
+  min_size         = 1
+  max_size         = 2
   desired_capacity = var.worker_desired_capacity
+
+  enabled_metrics = [
+    "GroupDesiredCapacity",
+    "GroupInServiceInstances",
+    "GroupTotalInstances",
+    "GroupMinSize",
+    "GroupMaxSize"
+  ]
 
   launch_template {
     id      = aws_launch_template.k3s_worker.id
@@ -552,5 +560,75 @@ resource "aws_autoscaling_group" "k3s_workers" {
 
   # Wait for instances to be healthy before considering ASG ready
   wait_for_capacity_timeout = "10m"
+}
+
+# Auto Scaling Policy for Scale-Up
+resource "aws_autoscaling_policy" "k3s_workers_scale_up" {
+  name                   = "k3s-workers-scale-up-prod"
+  autoscaling_group_name = aws_autoscaling_group.k3s_workers.name
+  adjustment_type        = "ChangeInCapacity"
+  scaling_adjustment     = 1
+  cooldown               = 300
+  policy_type            = "SimpleScaling"
+}
+
+# Auto Scaling Policy for Scale-Down
+resource "aws_autoscaling_policy" "k3s_workers_scale_down" {
+  name                   = "k3s-workers-scale-down-prod"
+  autoscaling_group_name = aws_autoscaling_group.k3s_workers.name
+  adjustment_type        = "ChangeInCapacity"
+  scaling_adjustment     = -1
+  cooldown               = 300
+  policy_type            = "SimpleScaling"
+}
+
+# CloudWatch Alarm for Scale-Up (CPU > 50%)
+resource "aws_cloudwatch_metric_alarm" "k3s_workers_cpu_high" {
+  alarm_name          = "k3s-workers-cpu-high-prod"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 2
+  metric_name         = "CPUUtilization"
+  namespace           = "AWS/EC2"
+  period              = 60
+  statistic           = "Average"
+  threshold           = 50
+  alarm_description   = "This metric monitors k3s worker CPU utilization for scale-up"
+  treat_missing_data  = "notBreaching"
+
+  dimensions = {
+    AutoScalingGroupName = aws_autoscaling_group.k3s_workers.name
+  }
+
+  alarm_actions = [aws_autoscaling_policy.k3s_workers_scale_up.arn]
+
+  tags = {
+    Name        = "k3s-workers-cpu-high-prod"
+    Environment = "prod"
+  }
+}
+
+# CloudWatch Alarm for Scale-Down (CPU < 50%)
+resource "aws_cloudwatch_metric_alarm" "k3s_workers_cpu_low" {
+  alarm_name          = "k3s-workers-cpu-low-prod"
+  comparison_operator = "LessThanThreshold"
+  evaluation_periods  = 3
+  metric_name         = "CPUUtilization"
+  namespace           = "AWS/EC2"
+  period              = 60
+  statistic           = "Average"
+  threshold           = 50
+  alarm_description   = "This metric monitors k3s worker CPU utilization for scale-down (3 minutes)"
+  treat_missing_data  = "notBreaching"
+
+  dimensions = {
+    AutoScalingGroupName = aws_autoscaling_group.k3s_workers.name
+  }
+
+  alarm_actions = [aws_autoscaling_policy.k3s_workers_scale_down.arn]
+
+  tags = {
+    Name        = "k3s-workers-cpu-low-prod"
+    Environment = "prod"
+  }
 }
 
