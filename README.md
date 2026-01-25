@@ -78,5 +78,6 @@ Each environment maintains its own local Terraform state file in its respective 
 
 - ArgoCD password (run on master node where argocd is running): 
 ```
-kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath="{.data.password}" | base64 -d
+kubectl -n argocd get secret argocd-initial-admin-secret \
+  -o jsonpath="{.data.password}" | base64 -d; echo
 ```
