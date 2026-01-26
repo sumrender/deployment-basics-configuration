@@ -2,7 +2,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: cluster-autoscaler
-  namespace: default
+  namespace: kube-system
   annotations:
     argocd.argoproj.io/sync-wave: "1"
   labels:
@@ -17,6 +17,9 @@ spec:
       labels:
         app: cluster-autoscaler
     spec:
+      priorityClassName: system-cluster-critical
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
       serviceAccountName: cluster-autoscaler
       nodeSelector:
         node-role.kubernetes.io/control-plane: "true"
