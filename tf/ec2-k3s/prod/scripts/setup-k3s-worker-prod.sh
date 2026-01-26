@@ -126,6 +126,7 @@ install_k3s_agent_with_retry() {
     # Set environment variables for k3s agent installation
     export K3S_URL="https://${master_ip}:6443"
     export K3S_TOKEN="$k3s_token"
+    export INSTALL_K3S_EXEC="--cloud-provider-name=aws"
     
     log_info "Installing k3s as agent to join master at ${master_ip}..."
     log_info "K3S_URL: ${K3S_URL}"

@@ -500,8 +500,9 @@ main() {
     # --bind-address: IP address to bind to (0.0.0.0 listens on all interfaces)
     # --advertise-address: IP address to advertise to other nodes
     # --tls-san: Add IP to TLS certificate Subject Alternative Names
+    # --cloud-provider-name=aws: Enable AWS cloud provider integration for correct provider ID format
     # Note: --disable traefik is already included in install_k3s_binary function
-    install_k3s_binary "server" "--bind-address 0.0.0.0 --advertise-address ${master_ip} --tls-san ${master_ip}"
+    install_k3s_binary "server" "--bind-address 0.0.0.0 --advertise-address ${master_ip} --tls-san ${master_ip} --cloud-provider-name=aws"
     wait_for_k3s_ready
     verify_traefik_disabled
 
