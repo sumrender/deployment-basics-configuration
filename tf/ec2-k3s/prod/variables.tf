@@ -28,6 +28,24 @@ variable "worker_desired_capacity" {
   default     = 1
 }
 
+variable "worker_min_size" {
+  description = "Minimum number of worker nodes in the ASG"
+  type        = number
+  default     = 1
+}
+
+variable "worker_max_size" {
+  description = "Maximum number of worker nodes in the ASG"
+  type        = number
+  default     = 3
+}
+
+variable "cluster_autoscaler_version" {
+  description = "Cluster Autoscaler version"
+  type        = string
+  default     = "v1.29.0"
+}
+
 variable "allowed_ssh_cidr" {
   description = "CIDR block allowed to SSH (port 22)"
   type        = string

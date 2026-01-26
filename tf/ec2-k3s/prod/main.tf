@@ -70,6 +70,46 @@ resource "aws_iam_role_policy" "k3s_master_ssm" {
   })
 }
 
+# IAM policy for Cluster Autoscaler (attached to master node role)
+resource "aws_iam_role_policy" "k3s_master_cluster_autoscaler" {
+  name = "k3s-master-cluster-autoscaler-policy-prod"
+  role = aws_iam_role.k3s_master.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "autoscaling:DescribeAutoScalingGroups",
+          "autoscaling:DescribeAutoScalingInstances",
+          "autoscaling:DescribeLaunchConfigurations",
+          "autoscaling:DescribeScalingActivities",
+          "autoscaling:DescribeTags",
+          "ec2:DescribeInstanceTypes",
+          "ec2:DescribeLaunchTemplateVersions",
+          "ec2:DescribeImages"
+        ]
+        Resource = "*"
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "autoscaling:SetDesiredCapacity",
+          "autoscaling:TerminateInstanceInAutoScalingGroup"
+        ]
+        Resource = "*"
+        Condition = {
+          StringEquals = {
+            "autoscaling:ResourceTag/k8s.io/cluster-autoscaler/enabled" = "true"
+            "autoscaling:ResourceTag/k8s.io/cluster-autoscaler/k3s-prod" = "owned"
+          }
+        }
+      }
+    ]
+  })
+}
+
 # IAM instance profile for master node
 resource "aws_iam_instance_profile" "k3s_master" {
   name = "k3s-master-instance-profile-prod"
@@ -518,8 +558,8 @@ resource "aws_autoscaling_group" "k3s_workers" {
   health_check_type   = "EC2"
   health_check_grace_period = 300
 
-  min_size         = var.worker_desired_capacity
-  max_size         = var.worker_desired_capacity
+  min_size         = var.worker_min_size
+  max_size         = var.worker_max_size
   desired_capacity = var.worker_desired_capacity
 
   launch_template {
@@ -547,6 +587,19 @@ resource "aws_autoscaling_group" "k3s_workers" {
   tag {
     key                 = "Role"
     value               = "k3s-worker"
+    propagate_at_launch = true
+  }
+
+  # Cluster Autoscaler discovery tags
+  tag {
+    key                 = "k8s.io/cluster-autoscaler/enabled"
+    value               = "true"
+    propagate_at_launch = true
+  }
+
+  tag {
+    key                 = "k8s.io/cluster-autoscaler/k3s-prod"
+    value               = "owned"
     propagate_at_launch = true
   }
 
