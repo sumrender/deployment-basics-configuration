@@ -68,6 +68,32 @@ get_imds_token() {
         -H "X-aws-ec2-metadata-token-ttl-seconds: 21600"
 }
 
+# Get AWS provider ID for k3s node
+# Returns provider ID in format: aws:///<availability-zone>/<instance-id>
+# Requires IMDS_TOKEN to be set in the calling scope
+get_provider_id() {
+    log_info "Retrieving instance metadata for AWS provider ID..."
+    
+    local instance_id
+    instance_id=$(curl -s \
+        -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" \
+        http://169.254.169.254/latest/meta-data/instance-id)
+    
+    local availability_zone
+    availability_zone=$(curl -s \
+        -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" \
+        http://169.254.169.254/latest/meta-data/placement/availability-zone)
+    
+    if [[ -z "$instance_id" ]] || [[ -z "$availability_zone" ]]; then
+        log_error "Failed to retrieve instance ID or availability zone from EC2 metadata"
+        exit 1
+    fi
+    
+    local provider_id="aws:///${availability_zone}/${instance_id}"
+    log_info "AWS provider ID: ${provider_id}"
+    echo "$provider_id"
+}
+
 # Check if running as root
 check_root() {
     if [[ $EUID -ne 0 ]]; then
@@ -494,15 +520,20 @@ main() {
     fi
     
     log_info "Master node private IP: ${master_ip}"
+    
+    # Get AWS provider ID for k3s node
+    local provider_id
+    provider_id=$(get_provider_id)
+    
     log_info "Configuring k3s to bind to all interfaces and include private IP in TLS certificate..."
     
-    # Install k3s as server with network configuration
+    # Install k3s as server with network configuration and AWS provider ID
     # --bind-address: IP address to bind to (0.0.0.0 listens on all interfaces)
     # --advertise-address: IP address to advertise to other nodes
     # --tls-san: Add IP to TLS certificate Subject Alternative Names
-    # --cloud-provider-name=aws: Enable AWS cloud provider integration for correct provider ID format
+    # --kubelet-arg=provider-id: Set AWS provider ID for cluster autoscaler compatibility
     # Note: --disable traefik is already included in install_k3s_binary function
-    install_k3s_binary "server" "--bind-address 0.0.0.0 --advertise-address ${master_ip} --tls-san ${master_ip} --cloud-provider-name=aws"
+    install_k3s_binary "server" "--bind-address 0.0.0.0 --advertise-address ${master_ip} --tls-san ${master_ip} --kubelet-arg=provider-id=${provider_id}"
     wait_for_k3s_ready
     verify_traefik_disabled
 

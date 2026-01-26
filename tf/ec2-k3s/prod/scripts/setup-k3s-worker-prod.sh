@@ -69,6 +69,40 @@ get_imds_token() {
         -H "X-aws-ec2-metadata-token-ttl-seconds: 21600"
 }
 
+# Get AWS provider ID for k3s node
+# Returns provider ID in format: aws:///<availability-zone>/<instance-id>
+# Acquires a fresh IMDSv2 token internally
+get_provider_id() {
+    log_info "Retrieving instance metadata for AWS provider ID..."
+    
+    local imds_token
+    imds_token=$(get_imds_token)
+    
+    if [[ -z "$imds_token" ]]; then
+        log_error "Failed to acquire IMDSv2 token"
+        exit 1
+    fi
+    
+    local instance_id
+    instance_id=$(curl -s \
+        -H "X-aws-ec2-metadata-token: $imds_token" \
+        http://169.254.169.254/latest/meta-data/instance-id)
+    
+    local availability_zone
+    availability_zone=$(curl -s \
+        -H "X-aws-ec2-metadata-token: $imds_token" \
+        http://169.254.169.254/latest/meta-data/placement/availability-zone)
+    
+    if [[ -z "$instance_id" ]] || [[ -z "$availability_zone" ]]; then
+        log_error "Failed to retrieve instance ID or availability zone from EC2 metadata"
+        exit 1
+    fi
+    
+    local provider_id="aws:///${availability_zone}/${instance_id}"
+    log_info "AWS provider ID: ${provider_id}"
+    echo "$provider_id"
+}
+
 # Check if running as root
 check_root() {
     if [[ $EUID -ne 0 ]]; then
@@ -123,10 +157,14 @@ install_k3s_agent_with_retry() {
     local retry_count=0
     local retry_delay=10
     
+    # Get AWS provider ID for k3s node
+    local provider_id
+    provider_id=$(get_provider_id)
+    
     # Set environment variables for k3s agent installation
     export K3S_URL="https://${master_ip}:6443"
     export K3S_TOKEN="$k3s_token"
-    export INSTALL_K3S_EXEC="--cloud-provider-name=aws"
+    export INSTALL_K3S_EXEC="--kubelet-arg=provider-id=${provider_id}"
     
     log_info "Installing k3s as agent to join master at ${master_ip}..."
     log_info "K3S_URL: ${K3S_URL}"
