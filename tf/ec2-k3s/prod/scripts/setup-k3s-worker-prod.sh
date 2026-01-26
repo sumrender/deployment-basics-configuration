@@ -72,14 +72,15 @@ get_imds_token() {
 # Get AWS provider ID for k3s node
 # Returns provider ID in format: aws:///<availability-zone>/<instance-id>
 # Acquires a fresh IMDSv2 token internally
+# Note: Log messages are redirected to stderr to avoid polluting stdout
 get_provider_id() {
-    log_info "Retrieving instance metadata for AWS provider ID..."
+    log_info "Retrieving instance metadata for AWS provider ID..." >&2
     
     local imds_token
     imds_token=$(get_imds_token)
     
     if [[ -z "$imds_token" ]]; then
-        log_error "Failed to acquire IMDSv2 token"
+        log_error "Failed to acquire IMDSv2 token" >&2
         exit 1
     fi
     
@@ -94,12 +95,12 @@ get_provider_id() {
         http://169.254.169.254/latest/meta-data/placement/availability-zone)
     
     if [[ -z "$instance_id" ]] || [[ -z "$availability_zone" ]]; then
-        log_error "Failed to retrieve instance ID or availability zone from EC2 metadata"
+        log_error "Failed to retrieve instance ID or availability zone from EC2 metadata" >&2
         exit 1
     fi
     
     local provider_id="aws:///${availability_zone}/${instance_id}"
-    log_info "AWS provider ID: ${provider_id}"
+    log_info "AWS provider ID: ${provider_id}" >&2
     echo "$provider_id"
 }
 
