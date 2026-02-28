@@ -17,7 +17,7 @@ spec:
     spec:
       containers:
         - name: backend
-          image: sumrenders/todo-backend:0d4eab373a765add55bfbe56f904c601545a0710
+          image: sumrenders/todo-backend:29b8fbbc95ca2775f1b69717442810a2b8ea1020
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 3001
